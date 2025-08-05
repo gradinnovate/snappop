@@ -375,11 +375,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let menuWindow = PopupMenuWindow(selectedText: text)
                 
                 // Position according to UI spec: below selection, or above if no space
-                var origin = NSPoint(x: mouseLocation.x - 130, y: mouseLocation.y - 60)
+                var origin = NSPoint(x: mouseLocation.x - 90, y: mouseLocation.y - 60)
                 
                 if let screen = NSScreen.main {
                     let screenFrame = screen.visibleFrame
-                    let windowWidth: CGFloat = 260
+                    let windowWidth: CGFloat = 180
                     
                     // Horizontal positioning
                     if origin.x + windowWidth > screenFrame.maxX {
@@ -538,9 +538,9 @@ class PopupMenuWindow: NSWindow {
     init(selectedText: String) {
         self.selectedText = selectedText
         
-        // Calculate dynamic width based on buttons (4 buttons + separators + padding)
-        // Each button ~60px, 3 separators 1px each, padding 20px total
-        let contentRect = NSRect(x: 0, y: 0, width: 260, height: 40)
+        // Calculate dynamic width based on buttons (2 buttons + 1 separator + padding)
+        // Each button ~80px, 1 separator 1px, padding 20px total  
+        let contentRect = NSRect(x: 0, y: 0, width: 180, height: 40)
         super.init(
             contentRect: contentRect,
             styleMask: [.borderless],
@@ -620,17 +620,15 @@ class PopupMenuWindow: NSWindow {
         
         // Button specifications according to UI spec
         let buttonHeight: CGFloat = 40
-        let buttonWidth: CGFloat = 60
+        let buttonWidth: CGFloat = 80
         let separatorWidth: CGFloat = 1
         let leftPadding: CGFloat = 10
         
         // Create buttons with proper styling
-        let cutButton = createButton(title: "Cut", action: #selector(cutAction))
         let copyButton = createButton(title: "Copy", action: #selector(copyAction))  
-        let pasteButton = createButton(title: "Paste", action: #selector(pasteAction))
         let searchButton = createButton(title: "🔍", action: #selector(searchAction))
         
-        buttons = [cutButton, copyButton, pasteButton, searchButton]
+        buttons = [copyButton, searchButton]
         
         // Position buttons horizontally with separators
         var currentX: CGFloat = leftPadding
@@ -691,22 +689,6 @@ class PopupMenuWindow: NSWindow {
         return separator
     }
     
-    @objc func cutAction() {
-        // Copy to clipboard first
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(selectedText, forType: .string)
-        
-        // Simulate delete key to cut the selected text
-        let source = CGEventSource(stateID: .hidSystemState)
-        let deleteEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: true) // Delete key
-        let deleteUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x33, keyDown: false)
-        
-        deleteEvent?.post(tap: .cghidEventTap)
-        deleteUpEvent?.post(tap: .cghidEventTap)
-        
-        closeAndNotify()
-    }
     
     @objc func copyAction() {
         let pasteboard = NSPasteboard.general
@@ -715,20 +697,6 @@ class PopupMenuWindow: NSWindow {
         closeAndNotify()
     }
     
-    @objc func pasteAction() {
-        // Simulate CMD+V to paste
-        let source = CGEventSource(stateID: .hidSystemState)
-        let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true) // V key
-        let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
-        
-        keyDownEvent?.flags = .maskCommand
-        keyUpEvent?.flags = .maskCommand
-        
-        keyDownEvent?.post(tap: .cghidEventTap)
-        keyUpEvent?.post(tap: .cghidEventTap)
-        
-        closeAndNotify()
-    }
     
     @objc func searchAction() {
         // Open default browser with Google search
