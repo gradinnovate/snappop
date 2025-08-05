@@ -5,6 +5,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popupWindow: NSWindow?
     var eventTap: CFMachPort?
+    var mouseDownLocation: CGPoint?
+    var mouseDownTime: CFTimeInterval = 0
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         if !checkAccessibilityPermissions() {
@@ -48,7 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func setupTextSelectionMonitoring() {
-        let eventMask = (1 << CGEventType.leftMouseUp.rawValue)
+        let eventMask = (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.leftMouseUp.rawValue)
         
         guard let eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -57,7 +59,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 let appDelegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
-                appDelegate.handleMouseUp(event: event)
+                if type == .leftMouseDown {
+                    appDelegate.handleMouseDown(event: event)
+                } else if type == .leftMouseUp {
+                    appDelegate.handleMouseUp(event: event)
+                }
                 return Unmanaged.passUnretained(event)
             },
             userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
@@ -73,16 +79,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         CGEvent.tapEnable(tap: eventTap, enable: true)
     }
     
+    func handleMouseDown(event: CGEvent) {
+        mouseDownLocation = event.location
+        mouseDownTime = CFAbsoluteTimeGetCurrent()
+        print("Mouse down at location: \(mouseDownLocation!)")
+    }
+    
     func handleMouseUp(event: CGEvent) {
-        print("Mouse up event triggered")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            print("Preparing to get selected text...")
-            guard let self = self else {
-                print("AppDelegate has been released")
-                return
-            }
-            self.getSelectedText()
+        guard let mouseDownLoc = mouseDownLocation else {
+            print("No mouse down location recorded")
+            return
         }
+        
+        let mouseUpLocation = event.location
+        let distance = sqrt(pow(mouseUpLocation.x - mouseDownLoc.x, 2) + pow(mouseUpLocation.y - mouseDownLoc.y, 2))
+        let timeDiff = CFAbsoluteTimeGetCurrent() - mouseDownTime
+        
+        print("Mouse up at location: \(mouseUpLocation), distance: \(distance), time: \(timeDiff)")
+        
+        // Only trigger text selection if there was movement (drag) or held for a while
+        // This prevents simple clicks from triggering
+        if distance > 5 || timeDiff > 0.3 {
+            print("Detected potential text selection (drag or long press)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                print("Preparing to get selected text...")
+                guard let self = self else {
+                    print("AppDelegate has been released")
+                    return
+                }
+                self.getSelectedText()
+            }
+        } else {
+            print("Simple click detected, not checking for text selection")
+        }
+        
+        // Reset tracking variables
+        mouseDownLocation = nil
+        mouseDownTime = 0
     }
     
     func getSelectedText() {
