@@ -141,11 +141,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let axElement = element as! AXUIElement
         
+        // Get application info - try multiple methods
+        var appElement: CFTypeRef?
+        AXUIElementCopyAttributeValue(axElement, kAXTopLevelUIElementAttribute as CFString, &appElement)
+        
+        var appName: CFTypeRef?
+        if let app = appElement {
+            AXUIElementCopyAttributeValue(app as! AXUIElement, kAXTitleAttribute as CFString, &appName)
+        }
+        
+        // Also try getting the running application name
+        let runningApp = NSWorkspace.shared.frontmostApplication
+        let runningAppName = runningApp?.localizedName ?? "Unknown"
+        
+        let applicationName = (appName as? String) ?? runningAppName
+        print("Current application: \(applicationName) (frontmost: \(runningAppName))")
+        
         // Analyze element details
         analyzeElement(axElement, depth: 0)
         
-        // Try multiple methods to get selected text
+        // Try application-specific methods first
+        if applicationName.contains("Sublime Text") || runningAppName.contains("Sublime Text") {
+            print("Detected Sublime Text, using specialized methods...")
+            print("=== SEARCHING FOR TEXT EDITOR ELEMENTS ===")
+            // First, let's find the actual text editor elements
+            findTextEditorElements(from: axElement, depth: 0)
+            print("=== END TEXT EDITOR SEARCH ===")
+            
+            if let text = tryGetSublimeTextSelection(from: axElement) {
+                return text
+            }
+        }
+        
+        // Try multiple generic methods to get selected text
         if let text = tryGetSelectedText(from: axElement) {
+            return text
+        }
+        
+        // Try traversing child elements for Sublime Text and other editors
+        if let text = tryGetSelectedTextFromChildren(element: axElement) {
             return text
         }
         
@@ -153,9 +187,349 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
     
+    func tryGetSublimeTextSelection(from element: AXUIElement) -> String? {
+        print("Trying Sublime Text specific methods...")
+        
+        // Method 1: Look for AXStaticText elements that contain full text content
+        // Based on the structure analysis, Sublime Text exposes text via AXStaticText elements
+        if let text = findSublimeTextContent(from: element) {
+            print("Found text content in Sublime Text, attempting CMD+C to get selection...")
+            // We found text content, now use CMD+C to get the actual selection
+            if let selectedText = tryGetTextViaCopy() {
+                return selectedText
+            }
+        }
+        
+        // Method 2: Exhaustive search through all descendants for text selection
+        if let text = deepSearchForSelection(element: element, maxDepth: 5) {
+            return text
+        }
+        
+        // Method 3: Try all alternative accessibility attributes
+        if let text = tryAlternativeAccessibilityMethods(element: element) {
+            return text
+        }
+        
+        // Method 4: Direct CMD+C as fallback
+        if let text = tryGetTextViaCopy() {
+            return text
+        }
+        
+        return nil
+    }
+    
+    func findSublimeTextContent(from element: AXUIElement) -> String? {
+        // Look for AXStaticText elements with actual content
+        var children: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success {
+            if let childElements = children as? [AXUIElement] {
+                for child in childElements {
+                    var role: CFTypeRef?
+                    AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+                    
+                    if let roleStr = role as? String, roleStr == "AXStaticText" {
+                        // Check if this element has substantial text content
+                        var value: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &value) == .success {
+                            if let text = value as? String, text.count > 10 {
+                                print("Found AXStaticText with content length: \(text.count)")
+                                return text
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return nil
+    }
+    
+    func findTextEditorElements(from element: AXUIElement, depth: Int) {
+        guard depth < 10 else { return }
+        
+        let indent = String(repeating: "    ", count: depth)
+        
+        var role: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        let roleString = role as? String ?? "Unknown"
+        
+        print("\(indent)Examining element: \(roleString) at depth \(depth)")
+        
+        // Look for elements that might be text editors
+        let editorRoles = ["AXTextArea", "AXScrollArea", "AXDocument", "AXWebArea", "AXTextDocument"]
+        
+        if editorRoles.contains(roleString) {
+            print("\(indent)📝 FOUND POTENTIAL TEXT EDITOR: \(roleString)")
+            
+            // Analyze this element in detail
+            var attributeNames: CFArray?
+            if AXUIElementCopyAttributeNames(element, &attributeNames) == .success {
+                if let names = attributeNames as? [String] {
+                    print("\(indent)    Attributes: \(names)")
+                    
+                    // Check for selection-related attributes
+                    for attr in ["AXSelectedText", "AXSelectedTextRange", "AXValue", "AXDocument"] {
+                        if names.contains(attr) {
+                            var value: CFTypeRef?
+                            if AXUIElementCopyAttributeValue(element, attr as CFString, &value) == .success {
+                                if attr == "AXSelectedTextRange", let range = value {
+                                    if CFGetTypeID(range) == AXValueGetTypeID() {
+                                        let axValue = range as! AXValue
+                                        var cfRange = CFRange()
+                                        if AXValueGetValue(axValue, .cfRange, &cfRange) {
+                                            print("\(indent)    \(attr): location=\(cfRange.location), length=\(cfRange.length)")
+                                        }
+                                    }
+                                } else if let text = value as? String {
+                                    let preview = text.prefix(50)
+                                    print("\(indent)    \(attr): \(preview)...")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Analyze ALL AXStaticText elements in detail
+        if roleString == "AXStaticText" {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success {
+                if let text = value as? String {
+                    print("\(indent)📝 ANALYZING AXStaticText: \(text.prefix(30))... (length: \(text.count))")
+                    
+                    // Deep analysis of ALL text elements
+                    print("\(indent)   🔍 DEEP ANALYSIS OF TEXT ELEMENT:")
+                    var attributeNames: CFArray?
+                    if AXUIElementCopyAttributeNames(element, &attributeNames) == .success {
+                        if let names = attributeNames as? [String] {
+                            print("\(indent)       All attributes: \(names)")
+                            
+                            // Check ALL attributes that might contain selection info
+                            let selectionAttrs = ["AXSelectedText", "AXSelectedTextRange", "AXVisibleCharacterRange", "AXInsertionPointLineNumber", "AXNumberOfCharacters"]
+                            
+                            for attr in selectionAttrs {
+                                if names.contains(attr) {
+                                    var value: CFTypeRef?
+                                    if AXUIElementCopyAttributeValue(element, attr as CFString, &value) == .success {
+                                        if attr == "AXSelectedTextRange" || attr == "AXVisibleCharacterRange" {
+                                            if let range = value, CFGetTypeID(range) == AXValueGetTypeID() {
+                                                let axValue = range as! AXValue
+                                                var cfRange = CFRange()
+                                                if AXValueGetValue(axValue, .cfRange, &cfRange) {
+                                                    print("\(indent)       \(attr): location=\(cfRange.location), length=\(cfRange.length)")
+                                                }
+                                            }
+                                        } else if let stringValue = value as? String {
+                                            print("\(indent)       \(attr): \(stringValue)")
+                                        } else if let numberValue = value as? NSNumber {
+                                            print("\(indent)       \(attr): \(numberValue)")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    print("\(indent)📝 AXStaticText with no text value")
+                }
+            } else {
+                print("\(indent)📝 AXStaticText (cannot read value)")
+            }
+        }
+        
+        // Check Groups as well
+        if roleString == "AXGroup" {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success {
+                if let text = value as? String, text.count > 10 {
+                    print("\(indent)📄 Group with text content: \(text.prefix(30))... (length: \(text.count))")
+                }
+            }
+        }
+        
+        // Recursively search children
+        var children: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success {
+            if let childArray = children as? [AXUIElement] {
+                if childArray.count > 0 {
+                    print("\(indent)   Children count: \(childArray.count)")
+                    for child in childArray {
+                        findTextEditorElements(from: child, depth: depth + 1)
+                    }
+                }
+            }
+        }
+    }
+    
+    func deepSearchForSelection(element: AXUIElement, maxDepth: Int, currentDepth: Int = 0) -> String? {
+        guard currentDepth < maxDepth else { return nil }
+        
+        // Try getting selection from current element
+        if let text = tryGetSelectedTextDirect(from: element) {
+            return text
+        }
+        
+        // Get all children and search recursively
+        var children: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success {
+            if let childElements = children as? [AXUIElement] {
+                for child in childElements {
+                    var role: CFTypeRef?
+                    AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+                    let roleStr = role as? String ?? "Unknown"
+                    
+                    if currentDepth == 0 {
+                        print("Searching child role: \(roleStr) at depth \(currentDepth)")
+                    }
+                    
+                    // Recursively search children
+                    if let text = deepSearchForSelection(element: child, maxDepth: maxDepth, currentDepth: currentDepth + 1) {
+                        return text
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    func tryAlternativeAccessibilityMethods(element: AXUIElement) -> String? {
+        // Get all available attributes
+        var attributeNames: CFArray?
+        if AXUIElementCopyAttributeNames(element, &attributeNames) == .success {
+            if let names = attributeNames as? [String] {
+                print("Available attributes: \(names)")
+                
+                // Try all text-related attributes
+                let textAttributes = ["AXSelectedText", "AXValue", "AXDocument", "AXTextContent", "AXContents", "AXText"]
+                
+                for attr in textAttributes {
+                    if names.contains(attr) {
+                        var value: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(element, attr as CFString, &value) == .success {
+                            if let text = value as? String, !text.isEmpty {
+                                // Check if this might be selected text
+                                if attr == "AXSelectedText" || text.count < 1000 {
+                                    print("Found text via \(attr): \(text)")
+                                    return text
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    func tryGetSelectedTextDirect(from element: AXUIElement) -> String? {
+        // Method 1: Direct selected text
+        var selectedText: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedText) == .success {
+            if let text = selectedText as? String, !text.isEmpty {
+                print("Found direct selected text: \(text)")
+                return text
+            }
+        }
+        
+        // Method 2: Check if element has selection range
+        var selectedRange: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selectedRange) == .success {
+            if let range = selectedRange, CFGetTypeID(range) == AXValueGetTypeID() {
+                let axValue = range as! AXValue
+                var cfRange = CFRange()
+                if AXValueGetValue(axValue, .cfRange, &cfRange) && cfRange.length > 0 {
+                    print("Found non-zero selection range: location=\(cfRange.location), length=\(cfRange.length)")
+                    
+                    // Try getting the text using different value attributes
+                    let valueAttributes = ["AXValue", "AXDocument", "AXTextContent"]
+                    for attr in valueAttributes {
+                        var fullText: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(element, attr as CFString, &fullText) == .success {
+                            if let text = fullText as? String, text.count >= cfRange.location + cfRange.length {
+                                let startIndex = max(0, cfRange.location)
+                                let endIndex = min(text.count, cfRange.location + cfRange.length)
+                                
+                                if startIndex < endIndex {
+                                    let start = text.index(text.startIndex, offsetBy: startIndex)
+                                    let end = text.index(text.startIndex, offsetBy: endIndex)
+                                    let selectedText = String(text[start..<end])
+                                    if !selectedText.isEmpty {
+                                        print("Extracted selected text via \(attr): \(selectedText)")
+                                        return selectedText
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    func tryGetSelectedTextFromChildren(element: AXUIElement) -> String? {
+        print("Trying to get selected text from child elements...")
+        
+        var children: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success {
+            if let childElements = children as? [AXUIElement] {
+                for child in childElements {
+                    if let text = tryGetSelectedText(from: child) {
+                        return text
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    func tryGetTextViaCopy() -> String? {
+        print("Trying to get text via copy command...")
+        
+        // Save current clipboard content
+        let pasteboard = NSPasteboard.general
+        let originalContent = pasteboard.string(forType: .string)
+        
+        // Clear clipboard
+        pasteboard.clearContents()
+        
+        // Simulate CMD+C
+        let source = CGEventSource(stateID: .hidSystemState)
+        let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true) // C key
+        let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
+        
+        keyDownEvent?.flags = .maskCommand
+        keyUpEvent?.flags = .maskCommand
+        
+        keyDownEvent?.post(tap: .cghidEventTap)
+        keyUpEvent?.post(tap: .cghidEventTap)
+        
+        // Wait a bit for the copy to complete
+        usleep(100000) // 0.1 seconds
+        
+        // Check if clipboard has new content
+        let newContent = pasteboard.string(forType: .string)
+        
+        // Restore original clipboard if we didn't get anything new
+        if newContent == nil || newContent?.isEmpty == true || newContent == originalContent {
+            if let original = originalContent {
+                pasteboard.clearContents()
+                pasteboard.setString(original, forType: .string)
+            }
+            return nil
+        }
+        
+        print("Got text via copy: \(newContent ?? "")")
+        return newContent
+    }
+    
     func analyzeElement(_ element: AXUIElement, depth: Int) {
-        // Limit recursion depth to avoid crashes
-        guard depth < 3 else {
+        // Increase recursion depth for complete analysis, but still have a safety limit
+        guard depth < 10 else {
             print("Reached maximum analysis depth")
             return
         }
@@ -172,23 +546,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AXUIElementCopyAttributeValue(element, kAXRoleDescriptionAttribute as CFString, &roleDescription)
         let roleDesc = roleDescription as? String ?? ""
         
-        print("\(indent)Element: \(roleString) (\(roleDesc))")
+        // Get element title
+        var title: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
+        let titleString = title as? String ?? ""
         
-        // Only show key attributes to avoid too much output
-        let keyAttributes = ["AXSelectedText", "AXValue", "AXRole", "AXDescription", "AXDocument"]
+        print("\(indent)Element: \(roleString) (\(roleDesc)) \(titleString.isEmpty ? "" : "- \(titleString)")")
         
+        // Show ALL attributes for Sublime Text analysis
         var attributeNames: CFArray?
         if AXUIElementCopyAttributeNames(element, &attributeNames) == .success {
             if let names = attributeNames as? [String] {
+                print("\(indent)  Available attributes: \(names)")
+                
+                // Show values for key attributes
+                let keyAttributes = ["AXSelectedText", "AXSelectedTextRange", "AXValue", "AXRole", "AXDescription", "AXDocument", "AXTextContent", "AXContents", "AXText", "AXInsertionPointLineNumber"]
+                
                 for name in names where keyAttributes.contains(name) {
                     var value: CFTypeRef?
                     if AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success {
                         if let stringValue = value as? String, !stringValue.isEmpty {
-                            print("\(indent)  \(name): \(stringValue)")
+                            print("\(indent)    \(name): \(stringValue.prefix(100))...")
+                        } else if name == "AXSelectedTextRange" {
+                            if let range = value, CFGetTypeID(range) == AXValueGetTypeID() {
+                                let axValue = range as! AXValue
+                                var cfRange = CFRange()
+                                if AXValueGetValue(axValue, .cfRange, &cfRange) {
+                                    print("\(indent)    \(name): location=\(cfRange.location), length=\(cfRange.length)")
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+        
+        // Recursively analyze children
+        var children: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success {
+            if let childArray = children as? [AXUIElement] {
+                if childArray.count > 0 {
+                    print("\(indent)  Children count: \(childArray.count)")
+                    for (index, child) in childArray.enumerated() {
+                        print("\(indent)  Child \(index):")
+                        analyzeElement(child, depth: depth + 1)
+                    }
+                }
+            }
+        }
+        
+        // For elements that might contain text editors, force deeper exploration
+        if roleString.contains("Group") || roleString.contains("ScrollArea") || roleString.contains("SplitGroup") {
+            print("\(indent)  --> Potentially contains text editor, exploring deeper...")
         }
     }
     
