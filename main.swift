@@ -474,13 +474,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return text
         }
         
-        // Module 6: Use FallbackMethodController to determine if CMD+C should be used
-        let gestureData: FallbackMethodController.GestureData?
+        // Enhanced Easydict-style fallback system
+        let gestureData: GestureData?
         if let mouseDown = mouseDownLocation, let mouseUp = mouseUpLocation {
             let distance = sqrt(pow(mouseUp.x - mouseDown.x, 2) + pow(mouseUp.y - mouseDown.y, 2))
             let timeDiff = currentTime - mouseDownTime
             
-            gestureData = FallbackMethodController.GestureData(
+            gestureData = GestureData(
                 mouseDown: mouseDown,
                 mouseUp: mouseUp,
                 duration: timeDiff,
@@ -490,12 +490,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             gestureData = nil
         }
         
-        // Check if CMD+C fallback should be used for this application
-        if FallbackMethodController.shouldUseCmdCFallback(for: applicationName, gestureData: gestureData) {
-            print("FallbackMethodController approved CMD+C for \(applicationName)")
-            return tryGetTextViaCopy()
+        // Use EasydictFallbackController for smart fallback decisions
+        if EasydictFallbackController.shouldUseFallback(for: applicationName, gestureData: gestureData) {
+            os_log("Using EasydictFallbackController for %{public}@", log: .textSelection, type: .info, applicationName)
+            return EasydictFallbackController.getSelectedTextWithPreferences(
+                for: applicationName, 
+                element: axElement, 
+                gestureData: gestureData
+            )
         } else {
-            print("FallbackMethodController rejected CMD+C for \(applicationName)")
+            os_log("EasydictFallbackController rejected fallback for %{public}@", log: .textSelection, type: .info, applicationName)
             return nil
         }
     }
