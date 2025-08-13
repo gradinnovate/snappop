@@ -2,7 +2,7 @@
 
 echo "Building SnapPop..."
 
-swiftc -o SnapPop main.swift -framework Cocoa -framework Carbon
+swiftc -o SnapPop main.swift Sources/*.swift -framework Cocoa -framework Carbon
 
 if [ $? -eq 0 ]; then
     echo "Build successful! Run './SnapPop' to start the application."
