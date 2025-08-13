@@ -40,6 +40,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         setupStatusItem()
         setupTextSelectionMonitoring()
+        setupEnhancedMonitoring()
+    }
+    
+    func setupEnhancedMonitoring() {
+        // Initialize multi-layered monitoring system
+        EnhancedEventValidator.setupWindowMonitoring()
+        // WindowOperationDetector is already a singleton and auto-initializes
+        os_log("Enhanced monitoring system initialized", log: .lifecycle, type: .info)
     }
     
     func checkAccessibilityPermissions() -> Bool {
@@ -184,6 +192,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
+        // Multi-layered monitoring system integration
+        let gestureData = GestureData(
+            mouseDown: mouseDownLoc,
+            mouseUp: mouseUpLocation, 
+            duration: timeDiff,
+            distance: distance
+        )
+        
+        // Layer 1: Window operation detection
+        if WindowOperationDetector.shared.shouldSuppressPopup(for: gestureData) {
+            os_log("Popup suppressed by WindowOperationDetector", log: .validation, type: .info)
+            resetTrackingVariables()
+            return
+        }
+        
+        // Layer 2: Advanced drag operation classification
+        let dragResult = DragOperationClassifier.classifyDragOperation(gestureData)
+        if DragOperationClassifier.shouldSuppressPopup(dragResult) {
+            os_log("Popup suppressed by DragOperationClassifier: %{public}@", log: .validation, type: .info, dragResult.reason)
+            resetTrackingVariables()
+            return
+        }
+        
         // Module 4: Enhanced event validation with multiple criteria
         let originalCriteriaMet = distance > 5 || timeDiff > 0.3
         
@@ -199,7 +230,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
             
             if enhancedValidation.isValid {
-                debugPrint("Enhanced validation passed: \(enhancedValidation.reason)")
+                os_log("Enhanced validation passed: %{public}@", log: .validation, type: .info, enhancedValidation.reason)
+                os_log("Drag classification: %{public}@ (confidence: %.2f)", log: .validation, type: .info, 
+                       String(describing: dragResult.classification), dragResult.confidence)
                 print("Detected potential text selection (drag or long press)")
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -211,7 +244,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.getSelectedText(mouseUpLocation: mouseUpLocation, currentTime: currentTime)
                 }
             } else {
-                debugPrint("Enhanced validation failed: \(enhancedValidation.reason)")
+                os_log("Enhanced validation failed: %{public}@", log: .validation, type: .info, enhancedValidation.reason)
             }
         } else {
             print("Simple click detected, not checking for text selection")
@@ -757,10 +790,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        // Cleanup multi-layered monitoring system
+        EnhancedEventValidator.cleanup()
+        WindowOperationDetector.shared.cleanup()
+        
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
             CFMachPortInvalidate(eventTap)
         }
+        
+        os_log("Application cleanup completed", log: .lifecycle, type: .info)
     }
 }
 
