@@ -214,12 +214,28 @@ enum SelectionDirection {
 // MARK: - Module 3: Application Specific Handler
 class ApplicationSpecificHandler {
     
-    static func getTextForApplication(_ appName: String, element: AXUIElement) -> String? {
+    static func getTextForApplication(_ appName: String, element: AXUIElement, gestureData: FallbackMethodController.GestureData? = nil) -> String? {
         let normalizedAppName = appName.lowercased()
         
         // Check against our enhanced application database
         if let appConfig = getAppConfiguration(for: normalizedAppName) {
             print("ApplicationSpecificHandler: Using specialized handler for \(appName)")
+            
+            // For applications that use clipboard method, check with FallbackMethodController first
+            if appConfig.description.contains("CMD+C") || appConfig.description.contains("fallback") {
+                if let gestureData = gestureData {
+                    if !FallbackMethodController.shouldUseCmdCFallback(for: appName, gestureData: gestureData) {
+                        print("ApplicationSpecificHandler: FallbackMethodController rejected CMD+C for \(appName)")
+                        return tryStandardAccessibilityMethod(element)
+                    }
+                } else {
+                    print("ApplicationSpecificHandler: No gesture data for CMD+C decision, trying Accessibility first")
+                    if let text = tryStandardAccessibilityMethod(element) {
+                        return text
+                    }
+                }
+            }
+            
             return appConfig.textExtractionMethod(element)
         }
         
@@ -562,13 +578,111 @@ struct ValidationResult {
     let reason: String
 }
 
+// MARK: - Module 6: Fallback Method Controller
+class FallbackMethodController {
+    
+    struct GestureData {
+        let mouseDown: CGPoint
+        let mouseUp: CGPoint
+        let duration: TimeInterval
+        let distance: Double
+    }
+    
+    static func shouldUseCmdCFallback(for appName: String, gestureData: GestureData?) -> Bool {
+        let normalizedAppName = appName.lowercased()
+        
+        // Chrome-specific restrictions
+        if normalizedAppName.contains("chrome") {
+            return shouldUseCmdCForChrome(gestureData: gestureData)
+        }
+        
+        // Safari-specific restrictions
+        if normalizedAppName.contains("safari") {
+            return shouldUseCmdCForSafari(gestureData: gestureData)
+        }
+        
+        // Firefox-specific restrictions
+        if normalizedAppName.contains("firefox") {
+            return shouldUseCmdCForFirefox(gestureData: gestureData)
+        }
+        
+        // Default: allow CMD+C for other applications
+        return true
+    }
+    
+    private static func shouldUseCmdCForChrome(gestureData: GestureData?) -> Bool {
+        print("Chrome detected - evaluating CMD+C fallback necessity")
+        
+        guard let gesture = gestureData else {
+            print("Chrome: No gesture data available - rejecting CMD+C")
+            return false
+        }
+        
+        // Chrome requires clear text selection gestures
+        let hasSignificantDrag = gesture.distance >= 10
+        let hasLongHold = gesture.duration >= 0.5
+        
+        if !hasSignificantDrag && !hasLongHold {
+            print("Chrome: Insufficient gesture evidence (distance: \(gesture.distance)px, time: \(gesture.duration)s) - rejecting CMD+C")
+            return false
+        }
+        
+        print("Chrome: Justified CMD+C usage - distance: \(gesture.distance)px, duration: \(gesture.duration)s")
+        return true
+    }
+    
+    private static func shouldUseCmdCForSafari(gestureData: GestureData?) -> Bool {
+        print("Safari detected - evaluating CMD+C fallback necessity")
+        
+        guard let gesture = gestureData else {
+            print("Safari: No gesture data available - rejecting CMD+C")
+            return false
+        }
+        
+        // Safari is slightly more lenient than Chrome
+        let hasMinimalDrag = gesture.distance >= 5
+        let hasMinimalHold = gesture.duration >= 0.3
+        
+        if !hasMinimalDrag && !hasMinimalHold {
+            print("Safari: Insufficient gesture evidence (distance: \(gesture.distance)px, time: \(gesture.duration)s) - rejecting CMD+C")
+            return false
+        }
+        
+        print("Safari: Justified CMD+C usage - distance: \(gesture.distance)px, duration: \(gesture.duration)s")
+        return true
+    }
+    
+    private static func shouldUseCmdCForFirefox(gestureData: GestureData?) -> Bool {
+        print("Firefox detected - evaluating CMD+C fallback necessity")
+        
+        // Firefox generally has better accessibility support, be more restrictive
+        guard let gesture = gestureData else {
+            print("Firefox: No gesture data available - rejecting CMD+C")
+            return false
+        }
+        
+        let hasSignificantDrag = gesture.distance >= 15
+        let hasLongHold = gesture.duration >= 0.6
+        
+        if !hasSignificantDrag && !hasLongHold {
+            print("Firefox: Insufficient gesture evidence (distance: \(gesture.distance)px, time: \(gesture.duration)s) - rejecting CMD+C")
+            return false
+        }
+        
+        print("Firefox: Justified CMD+C usage - distance: \(gesture.distance)px, duration: \(gesture.duration)s")
+        return true
+    }
+}
+
 // MARK: - Module 5: Popup Dismissal Manager
 class PopupDismissalManager {
     weak var popupWindow: PopupMenuWindow?
     private var scrollMonitor: Any?
     private var mouseMoveMonitor: Any?
     private var keyMonitor: Any?
-    private var isCleanedUp: Bool = false // Prevent double cleanup
+    private var isCleanedUp: Bool = false
+    private var isDismissing: Bool = false // Prevent double cleanup
+    private var lastMouseMoveCheck: CFTimeInterval = 0 // Rate limiting for mouse move checks
     
     init(popupWindow: PopupMenuWindow) {
         self.popupWindow = popupWindow
@@ -602,6 +716,13 @@ class PopupDismissalManager {
         mouseMoveMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
             guard let self = self, let window = self.popupWindow, window.isVisible else { return }
             
+            // Rate limiting: only check every 50ms to prevent excessive calls during fast mouse movement
+            let currentTime = CFAbsoluteTimeGetCurrent()
+            if currentTime - self.lastMouseMoveCheck < 0.05 {
+                return
+            }
+            self.lastMouseMoveCheck = currentTime
+            
             let mouseLocation = NSEvent.mouseLocation
             let windowCenter = NSPoint(x: window.frame.midX, y: window.frame.midY)
             let distance = sqrt(pow(mouseLocation.x - windowCenter.x, 2) + pow(mouseLocation.y - windowCenter.y, 2))
@@ -624,6 +745,15 @@ class PopupDismissalManager {
     }
     
     private func dismissPopup() {
+        // Prevent multiple simultaneous dismissal attempts
+        guard !isDismissing else {
+            print("🔧 DEBUG: Dismissal already in progress, skipping...")
+            return
+        }
+        
+        isDismissing = true
+        print("🔧 DEBUG: Starting dismissal process")
+        
         DispatchQueue.main.async { [weak self] in
             self?.popupWindow?.closeAndNotify()
         }
@@ -639,10 +769,12 @@ class PopupDismissalManager {
         }
         
         isCleanedUp = true
+        isDismissing = false // Reset dismissal flag
         
         // CRITICAL: Clear window reference FIRST to prevent access during cleanup
         popupWindow = nil
         
+        // Remove monitors with additional safety checks
         if let monitor = scrollMonitor {
             print("🔧 DEBUG: Removing scroll monitor")
             NSEvent.removeMonitor(monitor)
@@ -857,7 +989,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         print("AppDelegate has been released")
                         return
                     }
-                    self.getSelectedText()
+                    self.getSelectedText(mouseUpLocation: mouseUpLocation, currentTime: currentTime)
                 }
             } else {
                 print("Enhanced validation failed: \(enhancedValidation.reason)")
@@ -962,8 +1094,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         isCreatingPopup = false
     }
     
-    func getSelectedText() {
-        if let text = getSelectedTextViaAccessibility(), !text.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines) != "" {
+    func getSelectedText(mouseUpLocation: CGPoint? = nil, currentTime: CFTimeInterval = 0) {
+        if let text = getSelectedTextViaAccessibility(mouseUpLocation: mouseUpLocation, currentTime: currentTime), !text.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines) != "" {
             
             // Module 1: Enhanced validation with text frame checking
             // First get the focused element for frame validation
@@ -1012,7 +1144,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    func getSelectedTextViaAccessibility() -> String? {
+    func getSelectedTextViaAccessibility(mouseUpLocation: CGPoint? = nil, currentTime: CFTimeInterval = 0) -> String? {
         let systemWideElement = AXUIElementCreateSystemWide()
         var focusedElement: CFTypeRef?
         
@@ -1040,7 +1172,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Module 3: Enhanced application-specific handling
         // Try ApplicationSpecificHandler first (includes enhanced Sublime Text support)
-        if let text = ApplicationSpecificHandler.getTextForApplication(applicationName, element: axElement) {
+        let gestureDataForHandler: FallbackMethodController.GestureData?
+        if let mouseDown = mouseDownLocation, let mouseUp = mouseUpLocation {
+            let distance = sqrt(pow(mouseUp.x - mouseDown.x, 2) + pow(mouseUp.y - mouseDown.y, 2))
+            let timeDiff = currentTime - mouseDownTime
+            
+            gestureDataForHandler = FallbackMethodController.GestureData(
+                mouseDown: mouseDown,
+                mouseUp: mouseUp,
+                duration: timeDiff,
+                distance: distance
+            )
+        } else {
+            gestureDataForHandler = nil
+        }
+        
+        if let text = ApplicationSpecificHandler.getTextForApplication(applicationName, element: axElement, gestureData: gestureDataForHandler) {
             print("Got text via ApplicationSpecificHandler: \(text)")
             return text
         }
@@ -1048,7 +1195,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Preserve original Sublime Text handling as additional fallback
         if applicationName.contains("Sublime Text") || runningAppName.contains("Sublime Text") {
             print("Using original Sublime Text fallback")
-            return tryGetTextViaCopy()
+            // Still use FallbackMethodController for consistency, but Sublime Text should generally pass
+            let gestureData: FallbackMethodController.GestureData?
+            if let mouseDown = mouseDownLocation, let mouseUp = mouseUpLocation {
+                let distance = sqrt(pow(mouseUp.x - mouseDown.x, 2) + pow(mouseUp.y - mouseDown.y, 2))
+                let timeDiff = currentTime - mouseDownTime
+                
+                gestureData = FallbackMethodController.GestureData(
+                    mouseDown: mouseDown,
+                    mouseUp: mouseUp,
+                    duration: timeDiff,
+                    distance: distance
+                )
+            } else {
+                gestureData = nil
+            }
+            
+            if FallbackMethodController.shouldUseCmdCFallback(for: "sublime text", gestureData: gestureData) {
+                return tryGetTextViaCopy()
+            }
+            return nil
         }
         
         // Try standard accessibility methods for other applications (preserved)
@@ -1056,8 +1222,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return text
         }
         
-        // Try CMD+C as final fallback (preserved)
-        return tryGetTextViaCopy()
+        // Module 6: Use FallbackMethodController to determine if CMD+C should be used
+        let gestureData: FallbackMethodController.GestureData?
+        if let mouseDown = mouseDownLocation, let mouseUp = mouseUpLocation {
+            let distance = sqrt(pow(mouseUp.x - mouseDown.x, 2) + pow(mouseUp.y - mouseDown.y, 2))
+            let timeDiff = currentTime - mouseDownTime
+            
+            gestureData = FallbackMethodController.GestureData(
+                mouseDown: mouseDown,
+                mouseUp: mouseUp,
+                duration: timeDiff,
+                distance: distance
+            )
+        } else {
+            gestureData = nil
+        }
+        
+        // Check if CMD+C fallback should be used for this application
+        if FallbackMethodController.shouldUseCmdCFallback(for: applicationName, gestureData: gestureData) {
+            print("FallbackMethodController approved CMD+C for \(applicationName)")
+            return tryGetTextViaCopy()
+        } else {
+            print("FallbackMethodController rejected CMD+C for \(applicationName)")
+            return nil
+        }
     }
     
     
@@ -1699,10 +1887,8 @@ class PopupMenuWindow: NSWindow {
             self.animator().alphaValue = 0.0
         }, completionHandler: {
             self.orderOut(nil)
-            // Delayed close to avoid crashes
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.performClose(nil)
-            }
+            // Use orderOut instead of performClose to avoid potential beep sounds
+            print("🔧 DEBUG: Window closed gracefully without performClose")
         })
     }
 }
