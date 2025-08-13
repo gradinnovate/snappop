@@ -1,11 +1,26 @@
 import Cocoa
 import ApplicationServices
+import os.log
+
+// MARK: - Logging System for Production Release
+// Usage: os_log("message", log: .category, type: .level)
+// Types: .debug (dev only), .info (general info), .default (important), .error (errors), .fault (critical)
+// View logs: Console.app > search for "SnapPop" or use: log show --predicate 'subsystem == "com.gradinnovate.snappop"'
+extension OSLog {
+    private static var subsystem = Bundle.main.bundleIdentifier ?? "com.gradinnovate.snappop"
+    
+    static let textSelection = OSLog(subsystem: subsystem, category: "TextSelection")
+    static let popup = OSLog(subsystem: subsystem, category: "Popup")
+    static let accessibility = OSLog(subsystem: subsystem, category: "Accessibility")
+    static let validation = OSLog(subsystem: subsystem, category: "Validation")
+    static let lifecycle = OSLog(subsystem: subsystem, category: "Lifecycle")
+}
 
 // MARK: - Module 1: Text Frame Validator
 class TextFrameValidator {
     static func validateMousePositionInTextFrame(_ element: AXUIElement, mouseDownLocation: CGPoint?, currentMouseLocation: CGPoint?) -> Bool {
         guard let mouseDown = mouseDownLocation, let currentMouse = currentMouseLocation else {
-            print("TextFrameValidator: Missing mouse position data, skipping validation")
+            os_log("Missing mouse position data, skipping validation", log: .validation, type: .info)
             return true // Fallback to original behavior if no mouse data
         }
         
@@ -48,7 +63,7 @@ class TextFrameValidator {
                     let axValue = frame as! AXValue
                     var rect = CGRect.zero
                     if AXValueGetValue(axValue, .cgRect, &rect) {
-                        print("TextFrameValidator: Got text frame via bounds for range: \(rect)")
+                        debugPrint("TextFrameValidator: Got text frame via bounds for range: \(rect)")
                         return rect
                     }
                 }
@@ -71,7 +86,7 @@ class TextFrameValidator {
                         var position = CGPoint.zero
                         if AXValueGetValue(posValue, .cgPoint, &position) {
                             let rect = CGRect(origin: position, size: size)
-                            print("TextFrameValidator: Got element frame as fallback: \(rect)")
+                            debugPrint("TextFrameValidator: Got element frame as fallback: \(rect)")
                             return rect
                         }
                     }
@@ -79,7 +94,7 @@ class TextFrameValidator {
             }
         }
         
-        print("TextFrameValidator: Could not get any frame information")
+        os_log("Could not get any frame information", log: .validation, type: .debug)
         return nil
     }
 }
@@ -747,12 +762,12 @@ class PopupDismissalManager {
     private func dismissPopup() {
         // Prevent multiple simultaneous dismissal attempts
         guard !isDismissing else {
-            print("🔧 DEBUG: Dismissal already in progress, skipping...")
+            debugPrint("🔧 DEBUG: Dismissal already in progress, skipping...")
             return
         }
         
         isDismissing = true
-        print("🔧 DEBUG: Starting dismissal process")
+        debugPrint("🔧 DEBUG: Starting dismissal process")
         
         DispatchQueue.main.async { [weak self] in
             self?.popupWindow?.closeAndNotify()
@@ -760,11 +775,11 @@ class PopupDismissalManager {
     }
     
     func cleanup() {
-        print("🔧 DEBUG: PopupDismissalManager cleanup called, isCleanedUp: \(isCleanedUp)")
+        debugPrint("🔧 DEBUG: PopupDismissalManager cleanup called, isCleanedUp: \(isCleanedUp)")
         
         // Prevent double cleanup
         guard !isCleanedUp else {
-            print("🔧 DEBUG: Already cleaned up, skipping...")
+            debugPrint("🔧 DEBUG: Already cleaned up, skipping...")
             return
         }
         
@@ -776,24 +791,24 @@ class PopupDismissalManager {
         
         // Remove monitors with additional safety checks
         if let monitor = scrollMonitor {
-            print("🔧 DEBUG: Removing scroll monitor")
+            debugPrint("🔧 DEBUG: Removing scroll monitor")
             NSEvent.removeMonitor(monitor)
             scrollMonitor = nil
         }
         
         if let monitor = mouseMoveMonitor {
-            print("🔧 DEBUG: Removing mouse move monitor")
+            debugPrint("🔧 DEBUG: Removing mouse move monitor")
             NSEvent.removeMonitor(monitor)
             mouseMoveMonitor = nil
         }
         
         if let monitor = keyMonitor {
-            print("🔧 DEBUG: Removing key monitor")
+            debugPrint("🔧 DEBUG: Removing key monitor")
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
         }
         
-        print("🔧 DEBUG: PopupDismissalManager cleanup completed")
+        debugPrint("🔧 DEBUG: PopupDismissalManager cleanup completed")
     }
 }
 
@@ -915,7 +930,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func handleMouseDown(event: CGEvent) {
         mouseDownLocation = event.location
         mouseDownTime = CFAbsoluteTimeGetCurrent()
-        print("Mouse down at location: \(mouseDownLocation!)")
+        debugPrint("Mouse down at location: \(mouseDownLocation!)")
     }
     
     func handleMouseUp(event: CGEvent) {
@@ -926,22 +941,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let doubleClickDetected = detectDoubleClick(at: mouseUpLocation, time: currentTime)
         
         if doubleClickDetected {
-            print("Double-click detected at \(mouseUpLocation) - triggering text selection")
+            debugPrint("Double-click detected at \(mouseUpLocation) - triggering text selection")
             
             // Segfault fix: Check if popup is already being created OR already visible
             if isCreatingPopup {
-                print("Popup creation in progress, skipping double-click")
+                os_log("Popup creation in progress, skipping double-click", log: .popup, type: .info)
                 return
             }
             
             // CRITICAL: If popup is already visible, ignore double-click completely to prevent segfault
             if let existingPopup = popupWindow, existingPopup.isVisible {
-                print("🔧 DEBUG: Popup already visible, ignoring double-click to prevent segfault")
+                debugPrint("🔧 DEBUG: Popup already visible, ignoring double-click to prevent segfault")
                 return
             }
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                print("Preparing to get selected text from double-click...")
+                debugPrint("Preparing to get selected text from double-click...")
                 self?.getSelectedTextForDoubleClick()
             }
             return
@@ -956,7 +971,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let distance = sqrt(pow(mouseUpLocation.x - mouseDownLoc.x, 2) + pow(mouseUpLocation.y - mouseDownLoc.y, 2))
         let timeDiff = currentTime - mouseDownTime
         
-        print("Mouse up at location: \(mouseUpLocation), distance: \(distance), time: \(timeDiff)")
+        debugPrint("Mouse up at location: \(mouseUpLocation), distance: \(distance), time: \(timeDiff)")
         
         // Enhanced Feature 3: Improved false positive prevention
         if isLikelyUIInteraction(mouseDown: mouseDownLoc, mouseUp: mouseUpLocation, distance: distance) {
@@ -980,11 +995,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
             
             if enhancedValidation.isValid {
-                print("Enhanced validation passed: \(enhancedValidation.reason)")
+                debugPrint("Enhanced validation passed: \(enhancedValidation.reason)")
                 print("Detected potential text selection (drag or long press)")
                 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    print("Preparing to get selected text...")
+                    debugPrint("Preparing to get selected text...")
                     guard let self = self else {
                         print("AppDelegate has been released")
                         return
@@ -992,7 +1007,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.getSelectedText(mouseUpLocation: mouseUpLocation, currentTime: currentTime)
                 }
             } else {
-                print("Enhanced validation failed: \(enhancedValidation.reason)")
+                debugPrint("Enhanced validation failed: \(enhancedValidation.reason)")
             }
         } else {
             print("Simple click detected, not checking for text selection")
@@ -1017,7 +1032,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let distanceFromPopup = sqrt(pow(location.x - popupCenter.x, 2) + pow(location.y - popupCenter.y, 2))
             
             if distanceFromPopup < 100 { // If clicking near existing popup
-                print("🔧 DEBUG: Double-click near existing popup (\(distanceFromPopup)px), ignoring to prevent segfault")
+                debugPrint("🔧 DEBUG: Double-click near existing popup (\(distanceFromPopup)px), ignoring to prevent segfault")
                 lastClickTime = time // Update to prevent future detection issues
                 lastClickLocation = location
                 clickCount = 0 // Reset
@@ -1115,10 +1130,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 )
                 
                 if isValidPosition {
-                    print("TextFrameValidator: Position validation passed, showing popup")
+                    debugPrint("TextFrameValidator: Position validation passed, showing popup")
                     self.showPopupMenu(for: text)
                 } else {
-                    print("TextFrameValidator: Position validation failed, suppressing popup")
+                    debugPrint("TextFrameValidator: Position validation failed, suppressing popup")
                 }
             } else {
                 // Fallback to original behavior if we can't get the focused element
@@ -1137,10 +1152,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         if let text = getSelectedTextViaAccessibility(), !text.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines) != "" {
-            print("Double-click text selection successful: \(text.prefix(50))...")
+            debugPrint("Double-click text selection successful: \(text.prefix(50))...")
             self.showPopupMenu(for: text)
         } else {
-            print("Double-click detected but no text selected")
+            debugPrint("Double-click detected but no text selected")
         }
     }
     
@@ -1414,36 +1429,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     
     func showPopupMenu(for text: String) {
-        print("🔧 DEBUG: showPopupMenu called with text: \(text.prefix(20))...")
+        debugPrint("🔧 DEBUG: showPopupMenu called with text: \(text.prefix(20))...")
         
         // Segfault fix: Prevent concurrent popup creation
         popupCreationQueue.async { [weak self] in
-            print("🔧 DEBUG: In popupCreationQueue")
+            debugPrint("🔧 DEBUG: In popupCreationQueue")
             guard let self = self else { 
-                print("🔧 DEBUG: self is nil in popupCreationQueue")
+                debugPrint("🔧 DEBUG: self is nil in popupCreationQueue")
                 return 
             }
             
             // Check if already creating a popup
             if self.isCreatingPopup {
-                print("🔧 DEBUG: Popup creation already in progress, skipping...")
+                debugPrint("🔧 DEBUG: Popup creation already in progress, skipping...")
                 return
             }
             
-            print("🔧 DEBUG: Setting isCreatingPopup = true")
+            debugPrint("🔧 DEBUG: Setting isCreatingPopup = true")
             self.isCreatingPopup = true
             
             DispatchQueue.main.async { [weak self] in
-                print("🔧 DEBUG: In main async block")
+                debugPrint("🔧 DEBUG: In main async block")
                 guard let self = self else { 
-                    print("🔧 DEBUG: self is nil in main async")
+                    debugPrint("🔧 DEBUG: self is nil in main async")
                     return 
                 }
                 
-                print("🔧 DEBUG: About to close old window")
+                debugPrint("🔧 DEBUG: About to close old window")
                 // 先確保舊窗口完全關閉
                 if let oldWindow = self.popupWindow {
-                    print("🔧 DEBUG: Closing old window")
+                    debugPrint("🔧 DEBUG: Closing old window")
                     // Segfault fix: Safer window cleanup
                     self.popupWindow = nil // Clear reference BEFORE closing
                     DispatchQueue.main.async {
@@ -1453,16 +1468,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 // 短暫延遲確保清理完成
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
-                    print("🔧 DEBUG: In delayed creation block")
+                    debugPrint("🔧 DEBUG: In delayed creation block")
                     guard let self = self else { 
-                        print("🔧 DEBUG: self is nil in delayed block")
+                        debugPrint("🔧 DEBUG: self is nil in delayed block")
                         return 
                     }
                 
-                print("🔧 DEBUG: Creating new popup window")
+                debugPrint("🔧 DEBUG: Creating new popup window")
                 let mouseLocation = NSEvent.mouseLocation
                 let menuWindow = PopupMenuWindow(selectedText: text)
-                print("🔧 DEBUG: PopupMenuWindow created successfully")
+                debugPrint("🔧 DEBUG: PopupMenuWindow created successfully")
                 
                 // Module 2: Enhanced smart positioning with fallback to original logic
                 let windowSize = NSSize(width: 180, height: 40)
@@ -1653,35 +1668,35 @@ class PopupMenuWindow: NSWindow {
     private var dismissalManager: PopupDismissalManager?
     
     init(selectedText: String) {
-        print("🔧 DEBUG: PopupMenuWindow.init called")
+        debugPrint("🔧 DEBUG: PopupMenuWindow.init called")
         self.selectedText = selectedText
         
         // Calculate dynamic width based on buttons (2 buttons + 1 separator + padding)
         // Each button ~80px, 1 separator 1px, padding 20px total  
         let contentRect = NSRect(x: 0, y: 0, width: 180, height: 40)
-        print("🔧 DEBUG: About to call super.init")
+        debugPrint("🔧 DEBUG: About to call super.init")
         super.init(
             contentRect: contentRect,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
-        print("🔧 DEBUG: super.init completed")
+        debugPrint("🔧 DEBUG: super.init completed")
         
-        print("🔧 DEBUG: Setting up window")
+        debugPrint("🔧 DEBUG: Setting up window")
         setupWindow()
-        print("🔧 DEBUG: Setting up buttons")
+        debugPrint("🔧 DEBUG: Setting up buttons")
         setupButtons()
-        print("🔧 DEBUG: Setting up timeout")
+        debugPrint("🔧 DEBUG: Setting up timeout")
         setupTimeout()
         
-        print("🔧 DEBUG: Setting up enhanced dismissal")
+        debugPrint("🔧 DEBUG: Setting up enhanced dismissal")
         // Module 5: Setup enhanced dismissal management (preserves original timer)
         // Delay dismissal manager setup to avoid initialization conflicts
         DispatchQueue.main.async { [weak self] in
             self?.setupEnhancedDismissal()
         }
-        print("🔧 DEBUG: PopupMenuWindow.init completed")
+        debugPrint("🔧 DEBUG: PopupMenuWindow.init completed")
     }
     
     func setupTimeout() {
@@ -1888,7 +1903,7 @@ class PopupMenuWindow: NSWindow {
         }, completionHandler: {
             self.orderOut(nil)
             // Use orderOut instead of performClose to avoid potential beep sounds
-            print("🔧 DEBUG: Window closed gracefully without performClose")
+            debugPrint("🔧 DEBUG: Window closed gracefully without performClose")
         })
     }
 }
