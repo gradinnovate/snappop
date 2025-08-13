@@ -1,6 +1,612 @@
 import Cocoa
 import ApplicationServices
 
+// MARK: - Module 1: Text Frame Validator
+class TextFrameValidator {
+    static func validateMousePositionInTextFrame(_ element: AXUIElement, mouseDownLocation: CGPoint?, currentMouseLocation: CGPoint?) -> Bool {
+        guard let mouseDown = mouseDownLocation, let currentMouse = currentMouseLocation else {
+            print("TextFrameValidator: Missing mouse position data, skipping validation")
+            return true // Fallback to original behavior if no mouse data
+        }
+        
+        // Try to get the text selection frame
+        guard let textFrame = getTextSelectionFrame(from: element) else {
+            print("TextFrameValidator: Could not get text frame, allowing selection")
+            return true // Fallback to original behavior if frame unavailable
+        }
+        
+        // Expand frame by 40px (like Easydict) to handle imprecise bounds
+        let expandedFrame = textFrame.insetBy(dx: -40, dy: -40)
+        
+        let mouseDownInFrame = expandedFrame.contains(mouseDown)
+        let currentMouseInFrame = expandedFrame.contains(currentMouse)
+        
+        print("TextFrameValidator: Frame=\(textFrame), Expanded=\(expandedFrame)")
+        print("TextFrameValidator: MouseDown(\(mouseDown)) in frame: \(mouseDownInFrame)")
+        print("TextFrameValidator: CurrentMouse(\(currentMouse)) in frame: \(currentMouseInFrame)")
+        
+        // Both start and end positions should be within the text area
+        return mouseDownInFrame && currentMouseInFrame
+    }
+    
+    static func getTextSelectionFrame(from element: AXUIElement) -> CGRect? {
+        // Method 1: Try to get bounds for selected text range
+        var selectedRange: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selectedRange) == .success,
+           let range = selectedRange {
+            
+            var textFrame: CFTypeRef?
+            let result = AXUIElementCopyParameterizedAttributeValue(
+                element,
+                kAXBoundsForRangeParameterizedAttribute as CFString,
+                range,
+                &textFrame
+            )
+            
+            if result == .success, let frame = textFrame {
+                if CFGetTypeID(frame) == AXValueGetTypeID() {
+                    let axValue = frame as! AXValue
+                    var rect = CGRect.zero
+                    if AXValueGetValue(axValue, .cgRect, &rect) {
+                        print("TextFrameValidator: Got text frame via bounds for range: \(rect)")
+                        return rect
+                    }
+                }
+            }
+        }
+        
+        // Method 2: Fallback to element's general frame  
+        var elementFrame: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &elementFrame) == .success,
+           let frame = elementFrame {
+            if CFGetTypeID(frame) == AXValueGetTypeID() {
+                let axValue = frame as! AXValue
+                var size = CGSize.zero
+                if AXValueGetValue(axValue, .cgSize, &size) {
+                    // Try to get position as well
+                    var positionRef: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
+                       let posRef = positionRef, CFGetTypeID(posRef) == AXValueGetTypeID() {
+                        let posValue = posRef as! AXValue
+                        var position = CGPoint.zero
+                        if AXValueGetValue(posValue, .cgPoint, &position) {
+                            let rect = CGRect(origin: position, size: size)
+                            print("TextFrameValidator: Got element frame as fallback: \(rect)")
+                            return rect
+                        }
+                    }
+                }
+            }
+        }
+        
+        print("TextFrameValidator: Could not get any frame information")
+        return nil
+    }
+}
+
+// MARK: - Module 2: Popup Position Calculator
+class PopupPositionCalculator {
+    static func calculateSmartPosition(
+        originalPosition: NSPoint,
+        mouseLocation: CGPoint,
+        mouseDownLocation: CGPoint?,
+        windowSize: NSSize,
+        selectedText: String
+    ) -> NSPoint {
+        
+        // Detect text selection direction if we have mouse down data
+        let selectionDirection = detectSelectionDirection(
+            mouseDown: mouseDownLocation,
+            mouseUp: mouseLocation
+        )
+        
+        // Calculate enhanced position based on selection direction
+        var smartPosition = calculateDirectionalPosition(
+            mouseLocation: mouseLocation,
+            direction: selectionDirection,
+            windowSize: windowSize
+        )
+        
+        // Apply screen boundary handling with safety margins (like Easydict)
+        smartPosition = applySafetyConstraints(
+            position: smartPosition,
+            windowSize: windowSize,
+            safetyMargin: 50
+        )
+        
+        print("PopupPositionCalculator: Original=\(originalPosition), Smart=\(smartPosition), Direction=\(selectionDirection)")
+        
+        // Return smart position if valid, otherwise fallback to original
+        return isValidPosition(smartPosition, windowSize: windowSize) ? smartPosition : originalPosition
+    }
+    
+    private static func detectSelectionDirection(mouseDown: CGPoint?, mouseUp: CGPoint) -> SelectionDirection {
+        guard let mouseDown = mouseDown else {
+            return .unknown
+        }
+        
+        let deltaX = mouseUp.x - mouseDown.x
+        let deltaY = mouseUp.y - mouseDown.y
+        
+        // Determine primary direction based on larger movement
+        if abs(deltaX) > abs(deltaY) {
+            return deltaX > 0 ? .leftToRight : .rightToLeft
+        } else {
+            return deltaY > 0 ? .topToBottom : .bottomToTop
+        }
+    }
+    
+    private static func calculateDirectionalPosition(
+        mouseLocation: CGPoint,
+        direction: SelectionDirection,
+        windowSize: NSSize
+    ) -> NSPoint {
+        
+        let offset: CGFloat = 20 // Distance from selection
+        
+        switch direction {
+        case .leftToRight:
+            // Position to the right of selection end
+            return NSPoint(x: mouseLocation.x + offset, y: mouseLocation.y - windowSize.height - offset)
+            
+        case .rightToLeft:
+            // Position to the left of selection end
+            return NSPoint(x: mouseLocation.x - windowSize.width - offset, y: mouseLocation.y - windowSize.height - offset)
+            
+        case .topToBottom:
+            // Position below selection end
+            return NSPoint(x: mouseLocation.x - windowSize.width/2, y: mouseLocation.y - windowSize.height - offset)
+            
+        case .bottomToTop:
+            // Position above selection end
+            return NSPoint(x: mouseLocation.x - windowSize.width/2, y: mouseLocation.y + offset)
+            
+        case .unknown:
+            // Fallback to centered position slightly below
+            return NSPoint(x: mouseLocation.x - windowSize.width/2, y: mouseLocation.y - windowSize.height - offset)
+        }
+    }
+    
+    private static func applySafetyConstraints(
+        position: NSPoint,
+        windowSize: NSSize,
+        safetyMargin: CGFloat
+    ) -> NSPoint {
+        
+        guard let screen = NSScreen.main else {
+            return position
+        }
+        
+        let screenFrame = screen.visibleFrame
+        let safeFrame = screenFrame.insetBy(dx: safetyMargin, dy: safetyMargin)
+        
+        var safePosition = position
+        
+        // Horizontal constraints
+        safePosition.x = max(safeFrame.minX, min(safePosition.x, safeFrame.maxX - windowSize.width))
+        
+        // Vertical constraints  
+        safePosition.y = max(safeFrame.minY, min(safePosition.y, safeFrame.maxY - windowSize.height))
+        
+        return safePosition
+    }
+    
+    private static func isValidPosition(_ position: NSPoint, windowSize: NSSize) -> Bool {
+        guard let screen = NSScreen.main else {
+            return false
+        }
+        
+        let screenFrame = screen.visibleFrame
+        let windowFrame = NSRect(origin: position, size: windowSize)
+        
+        return screenFrame.contains(windowFrame)
+    }
+}
+
+enum SelectionDirection {
+    case leftToRight
+    case rightToLeft
+    case topToBottom
+    case bottomToTop
+    case unknown
+}
+
+// MARK: - Module 3: Application Specific Handler
+class ApplicationSpecificHandler {
+    
+    static func getTextForApplication(_ appName: String, element: AXUIElement) -> String? {
+        let normalizedAppName = appName.lowercased()
+        
+        // Check against our enhanced application database
+        if let appConfig = getAppConfiguration(for: normalizedAppName) {
+            print("ApplicationSpecificHandler: Using specialized handler for \(appName)")
+            return appConfig.textExtractionMethod(element)
+        }
+        
+        // Fallback to standard accessibility method
+        print("ApplicationSpecificHandler: Using standard handler for \(appName)")
+        return tryStandardAccessibilityMethod(element)
+    }
+    
+    private static func getAppConfiguration(for appName: String) -> AppConfiguration? {
+        // Enhanced application-specific configurations
+        let appConfigurations: [String: AppConfiguration] = [
+            // Text Editors (known to have accessibility issues)
+            "sublime text": AppConfiguration(
+                name: "Sublime Text",
+                textExtractionMethod: { _ in return tryClipboardMethod() },
+                description: "Uses CMD+C fallback due to limited AX support"
+            ),
+            
+            "visual studio code": AppConfiguration(
+                name: "Visual Studio Code",
+                textExtractionMethod: { element in 
+                    return tryStandardAccessibilityMethod(element) ?? tryClipboardMethod()
+                },
+                description: "Tries AX first, falls back to CMD+C"
+            ),
+            
+            "xcode": AppConfiguration(
+                name: "Xcode",
+                textExtractionMethod: { element in
+                    return tryStandardAccessibilityMethod(element) ?? tryClipboardMethod()
+                },
+                description: "Xcode editor text selection"
+            ),
+            
+            // Browsers (usually good AX support but may need special handling)
+            "safari": AppConfiguration(
+                name: "Safari",
+                textExtractionMethod: { element in
+                    return tryBrowserSpecificMethod(element)
+                },
+                description: "Enhanced web content selection"
+            ),
+            
+            "google chrome": AppConfiguration(
+                name: "Google Chrome", 
+                textExtractionMethod: { element in
+                    return tryBrowserSpecificMethod(element)
+                },
+                description: "Enhanced web content selection"
+            ),
+            
+            "firefox": AppConfiguration(
+                name: "Firefox",
+                textExtractionMethod: { element in
+                    return tryBrowserSpecificMethod(element)
+                },
+                description: "Enhanced web content selection"
+            ),
+            
+            // Communication Apps (often problematic)
+            "wechat": AppConfiguration(
+                name: "WeChat",
+                textExtractionMethod: { element in
+                    return tryStandardAccessibilityMethod(element) ?? tryClipboardMethod()
+                },
+                description: "Chat message selection with fallback"
+            ),
+            
+            "telegram": AppConfiguration(
+                name: "Telegram",
+                textExtractionMethod: { element in
+                    return tryStandardAccessibilityMethod(element) ?? tryClipboardMethod()
+                },
+                description: "Chat message selection with fallback"
+            ),
+            
+            "discord": AppConfiguration(
+                name: "Discord",
+                textExtractionMethod: { element in
+                    return tryStandardAccessibilityMethod(element) ?? tryClipboardMethod()
+                },
+                description: "Chat message selection with fallback"
+            )
+        ]
+        
+        // Try exact match first
+        if let config = appConfigurations[appName] {
+            return config
+        }
+        
+        // Try partial matches for complex app names
+        for (key, config) in appConfigurations {
+            if appName.contains(key) || key.contains(appName) {
+                return config
+            }
+        }
+        
+        return nil
+    }
+    
+    private static func tryStandardAccessibilityMethod(_ element: AXUIElement) -> String? {
+        // Method 1: Direct selected text
+        var selectedText: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedText) == .success {
+            if let text = selectedText as? String, !text.isEmpty {
+                print("ApplicationSpecificHandler: Got text via AXSelectedText: \(text)")
+                return text
+            }
+        }
+        
+        // Method 2: Text via selected range
+        var selectedRange: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selectedRange) == .success {
+            if let range = selectedRange, CFGetTypeID(range) == AXValueGetTypeID() {
+                let axValue = range as! AXValue
+                var cfRange = CFRange()
+                if AXValueGetValue(axValue, .cfRange, &cfRange), cfRange.length > 0 {
+                    // Get full text then extract selection
+                    var fullText: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &fullText) == .success {
+                        if let text = fullText as? String {
+                            let startIndex = max(0, cfRange.location)
+                            let endIndex = min(text.count, cfRange.location + cfRange.length)
+                            
+                            if startIndex < text.count && endIndex <= text.count && startIndex < endIndex {
+                                let start = text.index(text.startIndex, offsetBy: startIndex)
+                                let end = text.index(text.startIndex, offsetBy: endIndex)
+                                let selectedText = String(text[start..<end])
+                                if !selectedText.isEmpty {
+                                    print("ApplicationSpecificHandler: Got text via range: \(selectedText)")
+                                    return selectedText
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    private static func tryBrowserSpecificMethod(_ element: AXUIElement) -> String? {
+        // Try standard method first for browsers
+        if let text = tryStandardAccessibilityMethod(element) {
+            return text
+        }
+        
+        // Browser-specific enhancements could go here
+        // For now, fallback to clipboard method
+        return tryClipboardMethod()
+    }
+    
+    private static func tryClipboardMethod() -> String? {
+        // Save current clipboard content
+        let pasteboard = NSPasteboard.general
+        let originalContent = pasteboard.string(forType: .string)
+        
+        // Clear clipboard
+        pasteboard.clearContents()
+        
+        // Simulate CMD+C
+        let source = CGEventSource(stateID: .hidSystemState)
+        let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true) // C key
+        let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
+        
+        keyDownEvent?.flags = .maskCommand
+        keyUpEvent?.flags = .maskCommand
+        
+        keyDownEvent?.post(tap: .cghidEventTap)
+        keyUpEvent?.post(tap: .cghidEventTap)
+        
+        // Wait for copy to complete
+        usleep(100000) // 0.1 seconds
+        
+        // Check if clipboard has new content
+        let newContent = pasteboard.string(forType: .string)
+        
+        // Always restore original clipboard content
+        if let original = originalContent {
+            pasteboard.clearContents()
+            pasteboard.setString(original, forType: .string)
+        } else {
+            pasteboard.clearContents()
+        }
+        
+        // Return captured content if valid
+        if let content = newContent, !content.isEmpty, content != originalContent {
+            print("ApplicationSpecificHandler: Got text via clipboard: \(content)")
+            return content
+        }
+        
+        return nil
+    }
+}
+
+struct AppConfiguration {
+    let name: String
+    let textExtractionMethod: (AXUIElement) -> String?
+    let description: String
+}
+
+// MARK: - Module 4: Enhanced Event Validator
+class EnhancedEventValidator {
+    
+    static func validateSelectionGesture(
+        mouseDown: CGPoint,
+        mouseUp: CGPoint,
+        duration: CFTimeInterval,
+        distance: Double
+    ) -> ValidationResult {
+        
+        // Basic gesture classification
+        let gestureType = classifyGesture(distance: distance, duration: duration)
+        
+        // Validate based on gesture type
+        switch gestureType {
+        case .drag:
+            return validateDragGesture(mouseDown: mouseDown, mouseUp: mouseUp, distance: distance)
+            
+        case .longPress:
+            return validateLongPressGesture(duration: duration)
+            
+        case .click:
+            return ValidationResult(isValid: false, reason: "Simple click - no text selection expected")
+            
+        case .unknown:
+            return ValidationResult(isValid: true, reason: "Unknown gesture pattern - allowing with caution")
+        }
+    }
+    
+    private static func classifyGesture(distance: Double, duration: CFTimeInterval) -> GestureType {
+        let isSignificantMovement = distance > 5
+        let isLongDuration = duration > 0.3
+        
+        if isSignificantMovement && isLongDuration {
+            return .drag
+        } else if isSignificantMovement && !isLongDuration {
+            return .drag  // Quick drag
+        } else if !isSignificantMovement && isLongDuration {
+            return .longPress
+        } else {
+            return .click
+        }
+    }
+    
+    private static func validateDragGesture(mouseDown: CGPoint, mouseUp: CGPoint, distance: Double) -> ValidationResult {
+        // Enhanced drag validation
+        
+        // 1. Minimum distance threshold (more generous than original)
+        if distance < 3 {
+            return ValidationResult(isValid: false, reason: "Drag distance too small: \(distance)")
+        }
+        
+        // 2. Maximum reasonable distance (prevent window dragging false positives)
+        if distance > 2000 {
+            return ValidationResult(isValid: false, reason: "Drag distance unreasonably large: \(distance)")
+        }
+        
+        // 3. Direction analysis - prefer horizontal/vertical drags (common for text selection)
+        let deltaX = abs(mouseUp.x - mouseDown.x)
+        let deltaY = abs(mouseUp.y - mouseDown.y)
+        let aspectRatio = max(deltaX, deltaY) / max(min(deltaX, deltaY), 1)
+        
+        if aspectRatio > 10 {
+            // Very linear drag - likely text selection
+            return ValidationResult(isValid: true, reason: "Linear drag pattern detected (ratio: \(aspectRatio))")
+        } else if aspectRatio > 3 {
+            // Somewhat linear - probably text selection
+            return ValidationResult(isValid: true, reason: "Semi-linear drag pattern detected (ratio: \(aspectRatio))")
+        } else {
+            // More diagonal/circular - could be text selection or other gesture
+            return ValidationResult(isValid: true, reason: "Diagonal drag pattern - allowing with lower confidence")
+        }
+    }
+    
+    private static func validateLongPressGesture(duration: CFTimeInterval) -> ValidationResult {
+        // Enhanced long press validation
+        
+        if duration < 0.25 {
+            return ValidationResult(isValid: false, reason: "Duration too short for long press: \(duration)")
+        }
+        
+        if duration > 5.0 {
+            return ValidationResult(isValid: false, reason: "Duration too long - likely not intentional: \(duration)")
+        }
+        
+        return ValidationResult(isValid: true, reason: "Valid long press gesture: \(duration)s")
+    }
+}
+
+enum GestureType {
+    case drag
+    case longPress
+    case click
+    case unknown
+}
+
+struct ValidationResult {
+    let isValid: Bool
+    let reason: String
+}
+
+// MARK: - Module 5: Popup Dismissal Manager
+class PopupDismissalManager {
+    weak var popupWindow: PopupMenuWindow?
+    private var scrollMonitor: Any?
+    private var mouseMoveMonitor: Any?
+    private var keyMonitor: Any?
+    
+    init(popupWindow: PopupMenuWindow) {
+        self.popupWindow = popupWindow
+        setupDismissalMonitoring()
+    }
+    
+    deinit {
+        cleanup()
+    }
+    
+    private func setupDismissalMonitoring() {
+        setupScrollWheelMonitoring()
+        setupMouseMoveMonitoring()
+        setupKeyboardMonitoring()
+    }
+    
+    private func setupScrollWheelMonitoring() {
+        scrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self = self, let window = self.popupWindow, window.isVisible else { return }
+            
+            let scrollDistance = abs(event.scrollingDeltaY) + abs(event.scrollingDeltaX)
+            
+            if scrollDistance > 80 { // Easydict's threshold
+                print("PopupDismissalManager: Scroll detected (\(scrollDistance)), dismissing popup")
+                self.dismissPopup()
+            }
+        }
+    }
+    
+    private func setupMouseMoveMonitoring() {
+        mouseMoveMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            guard let self = self, let window = self.popupWindow, window.isVisible else { return }
+            
+            let mouseLocation = NSEvent.mouseLocation
+            let windowCenter = NSPoint(x: window.frame.midX, y: window.frame.midY)
+            let distance = sqrt(pow(mouseLocation.x - windowCenter.x, 2) + pow(mouseLocation.y - windowCenter.y, 2))
+            
+            if distance > 120 { // Easydict's 120px radius
+                print("PopupDismissalManager: Mouse moved outside radius (\(distance)px), dismissing popup")
+                self.dismissPopup()
+            }
+        }
+    }
+    
+    private func setupKeyboardMonitoring() {
+        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self, let window = self.popupWindow, window.isVisible else { return }
+            
+            // Dismiss on any keyboard activity (except during CMD+C operations)
+            print("PopupDismissalManager: Keyboard activity detected, dismissing popup")
+            self.dismissPopup()
+        }
+    }
+    
+    private func dismissPopup() {
+        DispatchQueue.main.async { [weak self] in
+            self?.popupWindow?.closeAndNotify()
+        }
+    }
+    
+    func cleanup() {
+        if let monitor = scrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollMonitor = nil
+        }
+        
+        if let monitor = mouseMoveMonitor {
+            NSEvent.removeMonitor(monitor)
+            mouseMoveMonitor = nil
+        }
+        
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popupWindow: NSWindow?
@@ -125,17 +731,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         print("Mouse up at location: \(mouseUpLocation), distance: \(distance), time: \(timeDiff)")
         
-        // Only trigger text selection if there was movement (drag) or held for a while
-        // This prevents simple clicks from triggering
-        if distance > 5 || timeDiff > 0.3 {
-            print("Detected potential text selection (drag or long press)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                print("Preparing to get selected text...")
-                guard let self = self else {
-                    print("AppDelegate has been released")
-                    return
+        // Module 4: Enhanced event validation with multiple criteria
+        let originalCriteriaMet = distance > 5 || timeDiff > 0.3
+        
+        if originalCriteriaMet {
+            print("Original criteria met: distance=\(distance), time=\(timeDiff)")
+            
+            // Additional validation using EnhancedEventValidator
+            let enhancedValidation = EnhancedEventValidator.validateSelectionGesture(
+                mouseDown: mouseDownLoc,
+                mouseUp: mouseUpLocation,
+                duration: timeDiff,
+                distance: distance
+            )
+            
+            if enhancedValidation.isValid {
+                print("Enhanced validation passed: \(enhancedValidation.reason)")
+                print("Detected potential text selection (drag or long press)")
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    print("Preparing to get selected text...")
+                    guard let self = self else {
+                        print("AppDelegate has been released")
+                        return
+                    }
+                    self.getSelectedText()
                 }
-                self.getSelectedText()
+            } else {
+                print("Enhanced validation failed: \(enhancedValidation.reason)")
             }
         } else {
             print("Simple click detected, not checking for text selection")
@@ -148,7 +771,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func getSelectedText() {
         if let text = getSelectedTextViaAccessibility(), !text.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines) != "" {
-            self.showPopupMenu(for: text)
+            
+            // Module 1: Enhanced validation with text frame checking
+            // First get the focused element for frame validation
+            let systemWideElement = AXUIElementCreateSystemWide()
+            var focusedElement: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+            
+            if result == .success, let element = focusedElement {
+                let axElement = element as! AXUIElement
+                let currentMouseLocation = NSEvent.mouseLocation
+                
+                // Use TextFrameValidator to enhance validation (preserves original behavior as fallback)
+                let isValidPosition = TextFrameValidator.validateMousePositionInTextFrame(
+                    axElement,
+                    mouseDownLocation: mouseDownLocation,
+                    currentMouseLocation: currentMouseLocation
+                )
+                
+                if isValidPosition {
+                    print("TextFrameValidator: Position validation passed, showing popup")
+                    self.showPopupMenu(for: text)
+                } else {
+                    print("TextFrameValidator: Position validation failed, suppressing popup")
+                }
+            } else {
+                // Fallback to original behavior if we can't get the focused element
+                print("TextFrameValidator: Could not get focused element, using original behavior")
+                self.showPopupMenu(for: text)
+            }
         }
     }
     
@@ -178,17 +829,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let applicationName = (appName as? String) ?? runningAppName
         
-        // Handle Sublime Text directly with CMD+C (known to not expose selection via AX APIs)
+        // Module 3: Enhanced application-specific handling
+        // Try ApplicationSpecificHandler first (includes enhanced Sublime Text support)
+        if let text = ApplicationSpecificHandler.getTextForApplication(applicationName, element: axElement) {
+            print("Got text via ApplicationSpecificHandler: \(text)")
+            return text
+        }
+        
+        // Preserve original Sublime Text handling as additional fallback
         if applicationName.contains("Sublime Text") || runningAppName.contains("Sublime Text") {
+            print("Using original Sublime Text fallback")
             return tryGetTextViaCopy()
         }
         
-        // Try standard accessibility methods for other applications
+        // Try standard accessibility methods for other applications (preserved)
         if let text = tryGetSelectedText(from: axElement) {
             return text
         }
         
-        // Try CMD+C as fallback for applications that don't expose selection via AX APIs
+        // Try CMD+C as final fallback (preserved)
         return tryGetTextViaCopy()
     }
     
@@ -374,28 +1033,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let mouseLocation = NSEvent.mouseLocation
                 let menuWindow = PopupMenuWindow(selectedText: text)
                 
-                // Position according to UI spec: below selection, or above if no space
-                var origin = NSPoint(x: mouseLocation.x - 90, y: mouseLocation.y - 60)
+                // Module 2: Enhanced smart positioning with fallback to original logic
+                let windowSize = NSSize(width: 180, height: 40)
+                
+                // Original positioning logic (preserved as baseline)
+                var originalOrigin = NSPoint(x: mouseLocation.x - 90, y: mouseLocation.y - 60)
                 
                 if let screen = NSScreen.main {
                     let screenFrame = screen.visibleFrame
                     let windowWidth: CGFloat = 180
                     
-                    // Horizontal positioning
-                    if origin.x + windowWidth > screenFrame.maxX {
-                        origin.x = screenFrame.maxX - windowWidth
+                    // Apply original horizontal positioning
+                    if originalOrigin.x + windowWidth > screenFrame.maxX {
+                        originalOrigin.x = screenFrame.maxX - windowWidth
                     }
-                    if origin.x < screenFrame.minX {
-                        origin.x = screenFrame.minX
+                    if originalOrigin.x < screenFrame.minX {
+                        originalOrigin.x = screenFrame.minX
                     }
                     
-                    // Vertical positioning - below by default, above if no space
-                    if origin.y < screenFrame.minY {
-                        origin.y = mouseLocation.y + 20
+                    // Apply original vertical positioning - below by default, above if no space
+                    if originalOrigin.y < screenFrame.minY {
+                        originalOrigin.y = mouseLocation.y + 20
                     }
                 }
                 
-                menuWindow.setFrameOrigin(origin)
+                // Calculate smart position using PopupPositionCalculator
+                let smartOrigin = PopupPositionCalculator.calculateSmartPosition(
+                    originalPosition: originalOrigin,
+                    mouseLocation: mouseLocation,
+                    mouseDownLocation: self.mouseDownLocation,
+                    windowSize: windowSize,
+                    selectedText: text
+                )
+                
+                // Use smart positioning as primary, original as fallback
+                let finalOrigin = smartOrigin
+                
+                menuWindow.setFrameOrigin(finalOrigin)
                 
                 // Add fade in + scale animation according to spec
                 menuWindow.alphaValue = 0.0
@@ -535,6 +1209,9 @@ class PopupMenuWindow: NSWindow {
     var timeoutTimer: Timer?
     private var buttons: [NSButton] = []
     
+    // Module 5: Enhanced dismissal management
+    private var dismissalManager: PopupDismissalManager?
+    
     init(selectedText: String) {
         self.selectedText = selectedText
         
@@ -551,9 +1228,13 @@ class PopupMenuWindow: NSWindow {
         setupWindow()
         setupButtons()
         setupTimeout()
+        
+        // Module 5: Setup enhanced dismissal management (preserves original timer)
+        setupEnhancedDismissal()
     }
     
     func setupTimeout() {
+        // Preserve original 1.5 second timeout behavior
         timeoutTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.closeAndNotify()
@@ -561,16 +1242,30 @@ class PopupMenuWindow: NSWindow {
         }
     }
     
+    // Module 5: Enhanced dismissal setup
+    func setupEnhancedDismissal() {
+        dismissalManager = PopupDismissalManager(popupWindow: self)
+    }
+    
     override func close() {
         print("close() called")
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        
+        // Module 5: Cleanup enhanced dismissal monitoring
+        dismissalManager?.cleanup()
+        dismissalManager = nil
+        
         super.close()
     }
     
     deinit {
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        
+        // Module 5: Ensure cleanup on deallocation
+        dismissalManager?.cleanup()
+        dismissalManager = nil
     }
     
     func setupWindow() {
