@@ -474,26 +474,65 @@ class EnhancedEventValidator {
             return ValidationResult(isValid: false, reason: "Drag distance too small: \(distance)")
         }
         
-        // 2. Maximum reasonable distance (prevent window dragging false positives)
-        if distance > 2000 {
-            return ValidationResult(isValid: false, reason: "Drag distance unreasonably large: \(distance)")
+        // 2. Detect window resize operations (usually start near screen edges or window borders)
+        if isLikelyWindowResizeOperation(mouseDown: mouseDown, distance: distance) {
+            return ValidationResult(isValid: false, reason: "Likely window resize operation")
         }
         
-        // 3. Direction analysis - prefer horizontal/vertical drags (common for text selection)
+        // 3. Maximum reasonable distance for text selection
+        if distance > 800 {
+            return ValidationResult(isValid: false, reason: "Drag distance too large for text selection: \(distance)")
+        }
+        
+        // 4. Direction analysis - prefer horizontal/vertical drags (common for text selection)
         let deltaX = abs(mouseUp.x - mouseDown.x)
         let deltaY = abs(mouseUp.y - mouseDown.y)
         let aspectRatio = max(deltaX, deltaY) / max(min(deltaX, deltaY), 1)
         
-        if aspectRatio > 10 {
+        if aspectRatio > 8 {
             // Very linear drag - likely text selection
             return ValidationResult(isValid: true, reason: "Linear drag pattern detected (ratio: \(aspectRatio))")
-        } else if aspectRatio > 3 {
+        } else if aspectRatio > 2.5 {
             // Somewhat linear - probably text selection
             return ValidationResult(isValid: true, reason: "Semi-linear drag pattern detected (ratio: \(aspectRatio))")
         } else {
-            // More diagonal/circular - could be text selection or other gesture
-            return ValidationResult(isValid: true, reason: "Diagonal drag pattern - allowing with lower confidence")
+            // More diagonal - likely window operation, be more restrictive
+            if distance > 300 {
+                return ValidationResult(isValid: false, reason: "Large diagonal drag - likely window operation: \(distance)px")
+            } else if distance > 150 {
+                // Allow medium diagonal drags - could be text selection across multiple lines
+                return ValidationResult(isValid: true, reason: "Medium diagonal drag - allowing for multi-line text selection: \(distance)px")
+            } else {
+                return ValidationResult(isValid: true, reason: "Small diagonal drag - allowing: \(distance)px")
+            }
         }
+    }
+    
+    private static func isLikelyWindowResizeOperation(mouseDown: CGPoint, distance: Double) -> Bool {
+        guard let screen = NSScreen.main else { return false }
+        
+        let screenFrame = screen.visibleFrame
+        let edgeThreshold: CGFloat = 50 // Distance from screen edge to consider "near edge"
+        
+        // Check if drag started near screen edges (common for window resizing)
+        let nearLeftEdge = mouseDown.x < screenFrame.minX + edgeThreshold
+        let nearRightEdge = mouseDown.x > screenFrame.maxX - edgeThreshold
+        let nearTopEdge = mouseDown.y > screenFrame.maxY - edgeThreshold
+        let nearBottomEdge = mouseDown.y < screenFrame.minY + edgeThreshold
+        
+        let nearScreenEdge = nearLeftEdge || nearRightEdge || nearTopEdge || nearBottomEdge
+        
+        // If starting near screen edge with significant movement, likely window resize
+        if nearScreenEdge && distance > 100 {
+            return true
+        }
+        
+        // Very large drags are usually window operations
+        if distance > 500 {
+            return true
+        }
+        
+        return false
     }
     
     private static func validateLongPressGesture(duration: CFTimeInterval) -> ValidationResult {
@@ -529,6 +568,7 @@ class PopupDismissalManager {
     private var scrollMonitor: Any?
     private var mouseMoveMonitor: Any?
     private var keyMonitor: Any?
+    private var isCleanedUp: Bool = false // Prevent double cleanup
     
     init(popupWindow: PopupMenuWindow) {
         self.popupWindow = popupWindow
@@ -590,20 +630,38 @@ class PopupDismissalManager {
     }
     
     func cleanup() {
+        print("🔧 DEBUG: PopupDismissalManager cleanup called, isCleanedUp: \(isCleanedUp)")
+        
+        // Prevent double cleanup
+        guard !isCleanedUp else {
+            print("🔧 DEBUG: Already cleaned up, skipping...")
+            return
+        }
+        
+        isCleanedUp = true
+        
+        // CRITICAL: Clear window reference FIRST to prevent access during cleanup
+        popupWindow = nil
+        
         if let monitor = scrollMonitor {
+            print("🔧 DEBUG: Removing scroll monitor")
             NSEvent.removeMonitor(monitor)
             scrollMonitor = nil
         }
         
         if let monitor = mouseMoveMonitor {
+            print("🔧 DEBUG: Removing mouse move monitor")
             NSEvent.removeMonitor(monitor)
             mouseMoveMonitor = nil
         }
         
         if let monitor = keyMonitor {
+            print("🔧 DEBUG: Removing key monitor")
             NSEvent.removeMonitor(monitor)
             keyMonitor = nil
         }
+        
+        print("🔧 DEBUG: PopupDismissalManager cleanup completed")
     }
 }
 
@@ -613,6 +671,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var eventTap: CFMachPort?
     var mouseDownLocation: CGPoint?
     var mouseDownTime: CFTimeInterval = 0
+    
+    // Enhanced detection for double-click and improved false positive prevention
+    private var lastClickTime: CFTimeInterval = 0
+    private var lastClickLocation: CGPoint = CGPoint.zero
+    private var clickCount: Int = 0
+    
+    // Segfault fix: Prevent multiple concurrent popup creations
+    private var isCreatingPopup: Bool = false
+    private let popupCreationQueue = DispatchQueue(label: "com.snappop.popup", qos: .userInteractive)
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         if !checkAccessibilityPermissions() {
@@ -720,16 +787,51 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func handleMouseUp(event: CGEvent) {
+        let currentTime = CFAbsoluteTimeGetCurrent()
+        let mouseUpLocation = event.location
+        
+        // Enhanced Feature 2: Double-click detection
+        let doubleClickDetected = detectDoubleClick(at: mouseUpLocation, time: currentTime)
+        
+        if doubleClickDetected {
+            print("Double-click detected at \(mouseUpLocation) - triggering text selection")
+            
+            // Segfault fix: Check if popup is already being created OR already visible
+            if isCreatingPopup {
+                print("Popup creation in progress, skipping double-click")
+                return
+            }
+            
+            // CRITICAL: If popup is already visible, ignore double-click completely to prevent segfault
+            if let existingPopup = popupWindow, existingPopup.isVisible {
+                print("🔧 DEBUG: Popup already visible, ignoring double-click to prevent segfault")
+                return
+            }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                print("Preparing to get selected text from double-click...")
+                self?.getSelectedTextForDoubleClick()
+            }
+            return
+        }
+        
+        // Original drag detection logic
         guard let mouseDownLoc = mouseDownLocation else {
             print("No mouse down location recorded")
             return
         }
         
-        let mouseUpLocation = event.location
         let distance = sqrt(pow(mouseUpLocation.x - mouseDownLoc.x, 2) + pow(mouseUpLocation.y - mouseDownLoc.y, 2))
-        let timeDiff = CFAbsoluteTimeGetCurrent() - mouseDownTime
+        let timeDiff = currentTime - mouseDownTime
         
         print("Mouse up at location: \(mouseUpLocation), distance: \(distance), time: \(timeDiff)")
+        
+        // Enhanced Feature 3: Improved false positive prevention
+        if isLikelyUIInteraction(mouseDown: mouseDownLoc, mouseUp: mouseUpLocation, distance: distance) {
+            print("Detected UI interaction - not triggering text selection")
+            resetTrackingVariables()
+            return
+        }
         
         // Module 4: Enhanced event validation with multiple criteria
         let originalCriteriaMet = distance > 5 || timeDiff > 0.3
@@ -764,9 +866,100 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("Simple click detected, not checking for text selection")
         }
         
-        // Reset tracking variables
+        resetTrackingVariables()
+    }
+    
+    // Enhanced Feature 2: Double-click detection
+    private func detectDoubleClick(at location: CGPoint, time: CFTimeInterval) -> Bool {
+        let doubleClickTimeThreshold: CFTimeInterval = 0.5 // 500ms
+        let doubleClickDistanceThreshold: CGFloat = 10 // 10px
+        
+        let timeDiff = time - lastClickTime
+        let distance = sqrt(pow(location.x - lastClickLocation.x, 2) + pow(location.y - lastClickLocation.y, 2))
+        
+        let isDoubleClick = timeDiff < doubleClickTimeThreshold && distance < doubleClickDistanceThreshold
+        
+        // CRITICAL: If popup is visible at same location, ignore double-click to prevent segfault
+        if let existingPopup = popupWindow, existingPopup.isVisible {
+            let popupCenter = NSPoint(x: existingPopup.frame.midX, y: existingPopup.frame.midY)
+            let distanceFromPopup = sqrt(pow(location.x - popupCenter.x, 2) + pow(location.y - popupCenter.y, 2))
+            
+            if distanceFromPopup < 100 { // If clicking near existing popup
+                print("🔧 DEBUG: Double-click near existing popup (\(distanceFromPopup)px), ignoring to prevent segfault")
+                lastClickTime = time // Update to prevent future detection issues
+                lastClickLocation = location
+                clickCount = 0 // Reset
+                return false
+            }
+        }
+        
+        // Update click tracking
+        lastClickTime = time
+        lastClickLocation = location
+        
+        if isDoubleClick {
+            clickCount += 1
+            if clickCount >= 2 {
+                clickCount = 0 // Reset for next potential double-click
+                return true
+            }
+        } else {
+            clickCount = 1 // Reset count for new click sequence
+        }
+        
+        return false
+    }
+    
+    // Enhanced Feature 3: Improved false positive prevention
+    private func isLikelyUIInteraction(mouseDown: CGPoint, mouseUp: CGPoint, distance: Double) -> Bool {
+        // Check for common UI interaction patterns
+        
+        // 1. Very small movements (likely button clicks)
+        if distance < 2 {
+            return true
+        }
+        
+        // 2. Perfectly vertical or horizontal movements (likely scrollbar/slider interactions)
+        let deltaX = abs(mouseUp.x - mouseDown.x)
+        let deltaY = abs(mouseUp.y - mouseDown.y)
+        
+        if deltaX < 5 && deltaY > 20 {
+            print("Vertical UI interaction detected")
+            return true
+        }
+        
+        if deltaY < 5 && deltaX > 20 {
+            print("Horizontal UI interaction detected")
+            return true
+        }
+        
+        // 3. Check if movement is in typical UI control areas (top/bottom edges)
+        guard let screen = NSScreen.main else { return false }
+        let screenFrame = screen.visibleFrame
+        
+        // Top area (menu bars, title bars)
+        if mouseDown.y > screenFrame.maxY - 100 {
+            print("Top area UI interaction detected")
+            return true
+        }
+        
+        // Bottom area (dock, taskbar)
+        if mouseDown.y < screenFrame.minY + 100 {
+            print("Bottom area UI interaction detected")
+            return true
+        }
+        
+        return false
+    }
+    
+    private func resetTrackingVariables() {
         mouseDownLocation = nil
         mouseDownTime = 0
+    }
+    
+    // Segfault fix: Public method to reset creation flag
+    func resetPopupCreationFlag() {
+        isCreatingPopup = false
     }
     
     func getSelectedText() {
@@ -800,6 +993,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 print("TextFrameValidator: Could not get focused element, using original behavior")
                 self.showPopupMenu(for: text)
             }
+        }
+    }
+    
+    // Enhanced method for double-click: more lenient validation
+    func getSelectedTextForDoubleClick() {
+        // Additional safety check
+        if isCreatingPopup {
+            print("Popup creation already in progress, skipping double-click text selection")
+            return
+        }
+        
+        if let text = getSelectedTextViaAccessibility(), !text.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines) != "" {
+            print("Double-click text selection successful: \(text.prefix(50))...")
+            self.showPopupMenu(for: text)
+        } else {
+            print("Double-click detected but no text selected")
         }
     }
     
@@ -1017,21 +1226,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     
     func showPopupMenu(for text: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            
-            // 先確保舊窗口完全關閉
-            if let oldWindow = self.popupWindow {
-                oldWindow.close()
-                self.popupWindow = nil
+        print("🔧 DEBUG: showPopupMenu called with text: \(text.prefix(20))...")
+        
+        // Segfault fix: Prevent concurrent popup creation
+        popupCreationQueue.async { [weak self] in
+            print("🔧 DEBUG: In popupCreationQueue")
+            guard let self = self else { 
+                print("🔧 DEBUG: self is nil in popupCreationQueue")
+                return 
             }
             
-            // 短暫延遲確保清理完成
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
-                guard let self = self else { return }
+            // Check if already creating a popup
+            if self.isCreatingPopup {
+                print("🔧 DEBUG: Popup creation already in progress, skipping...")
+                return
+            }
+            
+            print("🔧 DEBUG: Setting isCreatingPopup = true")
+            self.isCreatingPopup = true
+            
+            DispatchQueue.main.async { [weak self] in
+                print("🔧 DEBUG: In main async block")
+                guard let self = self else { 
+                    print("🔧 DEBUG: self is nil in main async")
+                    return 
+                }
                 
+                print("🔧 DEBUG: About to close old window")
+                // 先確保舊窗口完全關閉
+                if let oldWindow = self.popupWindow {
+                    print("🔧 DEBUG: Closing old window")
+                    // Segfault fix: Safer window cleanup
+                    self.popupWindow = nil // Clear reference BEFORE closing
+                    DispatchQueue.main.async {
+                        oldWindow.close()
+                    }
+                }
+                
+                // 短暫延遲確保清理完成
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+                    print("🔧 DEBUG: In delayed creation block")
+                    guard let self = self else { 
+                        print("🔧 DEBUG: self is nil in delayed block")
+                        return 
+                    }
+                
+                print("🔧 DEBUG: Creating new popup window")
                 let mouseLocation = NSEvent.mouseLocation
                 let menuWindow = PopupMenuWindow(selectedText: text)
+                print("🔧 DEBUG: PopupMenuWindow created successfully")
                 
                 // Module 2: Enhanced smart positioning with fallback to original logic
                 let windowSize = NSSize(width: 180, height: 40)
@@ -1084,6 +1327,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 
                 self.popupWindow = menuWindow
+                
+                // Reset the creation flag
+                self.isCreatingPopup = false
+                }
             }
         }
     }
@@ -1091,9 +1338,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func hidePopupMenu() {
         DispatchQueue.main.async {
             if let window = self.popupWindow {
-                window.close()
+                // Segfault fix: Safer window cleanup
+                self.popupWindow = nil // Clear reference BEFORE closing
+                DispatchQueue.main.async {
+                    window.close()
+                }
             }
-            self.popupWindow = nil
+            // Segfault fix: Reset creation flag
+            self.isCreatingPopup = false
         }
     }
     
@@ -1213,24 +1465,35 @@ class PopupMenuWindow: NSWindow {
     private var dismissalManager: PopupDismissalManager?
     
     init(selectedText: String) {
+        print("🔧 DEBUG: PopupMenuWindow.init called")
         self.selectedText = selectedText
         
         // Calculate dynamic width based on buttons (2 buttons + 1 separator + padding)
         // Each button ~80px, 1 separator 1px, padding 20px total  
         let contentRect = NSRect(x: 0, y: 0, width: 180, height: 40)
+        print("🔧 DEBUG: About to call super.init")
         super.init(
             contentRect: contentRect,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
+        print("🔧 DEBUG: super.init completed")
         
+        print("🔧 DEBUG: Setting up window")
         setupWindow()
+        print("🔧 DEBUG: Setting up buttons")
         setupButtons()
+        print("🔧 DEBUG: Setting up timeout")
         setupTimeout()
         
+        print("🔧 DEBUG: Setting up enhanced dismissal")
         // Module 5: Setup enhanced dismissal management (preserves original timer)
-        setupEnhancedDismissal()
+        // Delay dismissal manager setup to avoid initialization conflicts
+        DispatchQueue.main.async { [weak self] in
+            self?.setupEnhancedDismissal()
+        }
+        print("🔧 DEBUG: PopupMenuWindow.init completed")
     }
     
     func setupTimeout() {
@@ -1249,12 +1512,13 @@ class PopupMenuWindow: NSWindow {
     
     override func close() {
         print("close() called")
-        timeoutTimer?.invalidate()
-        timeoutTimer = nil
         
-        // Module 5: Cleanup enhanced dismissal monitoring
+        // CRITICAL: Clean up dismissal manager FIRST to remove event monitors
         dismissalManager?.cleanup()
         dismissalManager = nil
+        
+        timeoutTimer?.invalidate()
+        timeoutTimer = nil
         
         super.close()
     }
@@ -1424,6 +1688,8 @@ class PopupMenuWindow: NSWindow {
         if let appDelegate = NSApplication.shared.delegate as? AppDelegate {
             if appDelegate.popupWindow === self {
                 appDelegate.popupWindow = nil
+                // Segfault fix: Reset creation flag when window closes
+                appDelegate.resetPopupCreationFlag()
             }
         }
         
