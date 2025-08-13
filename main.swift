@@ -1741,40 +1741,46 @@ class PopupMenuWindow: NSWindow {
         level = .floating
         hasShadow = true
         
-        guard let currentContentView = contentView else { return }
-        
-        let visualEffect = NSVisualEffectView(frame: currentContentView.bounds)
-        
-        // Configure for pill shape with proper blur and transparency
-        if #available(macOS 10.14, *) {
-            visualEffect.material = .popover
-        } else {
-            visualEffect.material = .hudWindow
-        }
-        
-        visualEffect.blendingMode = .behindWindow
-        visualEffect.state = .active
-        visualEffect.wantsLayer = true
-        
-        // Pill shape: corner radius = height / 2 = 20px
-        visualEffect.layer?.cornerRadius = 20
-        visualEffect.autoresizingMask = [.width, .height]
-        
-        // Add proper shadow according to spec
-        if let layer = visualEffect.layer {
-            layer.shadowOpacity = 1.0
-            layer.shadowOffset = NSSize(width: 0, height: -3)
-            layer.shadowRadius = 6
-            
-            // Shadow color adapts to appearance
-            if #available(macOS 10.14, *) {
-                layer.shadowColor = NSColor.shadowColor.cgColor
-            } else {
-                layer.shadowColor = NSColor.black.withAlphaComponent(0.2).cgColor
+        // Ensure window has no border or frame
+        if let windowFrame = contentView?.superview {
+            windowFrame.wantsLayer = true
+            if let layer = windowFrame.layer {
+                layer.borderWidth = 0
+                layer.backgroundColor = NSColor.clear.cgColor
             }
         }
         
-        contentView = visualEffect
+        guard let currentContentView = contentView else { return }
+        
+        // Create a simple colored view instead of NSVisualEffectView to avoid border issues
+        let backgroundView = NSView(frame: currentContentView.bounds)
+        backgroundView.wantsLayer = true
+        backgroundView.autoresizingMask = [.width, .height]
+        
+        if let layer = backgroundView.layer {
+            // Pill shape: corner radius = height / 2 = 20px
+            layer.cornerRadius = 20
+            
+            // Clean background with appropriate opacity for modern macOS look
+            if #available(macOS 10.14, *) {
+                // Use dynamic system colors that adapt to light/dark mode
+                layer.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.95).cgColor
+            } else {
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.95).cgColor
+            }
+            
+            // Ensure no border
+            layer.borderWidth = 0
+            layer.borderColor = NSColor.clear.cgColor
+            
+            // Add proper shadow according to spec
+            layer.shadowOpacity = 0.3
+            layer.shadowOffset = NSSize(width: 0, height: -3)
+            layer.shadowRadius = 6
+            layer.shadowColor = NSColor.black.cgColor
+        }
+        
+        contentView = backgroundView
     }
     
     func setupButtons() {
