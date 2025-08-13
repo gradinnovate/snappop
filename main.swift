@@ -47,7 +47,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize multi-layered monitoring system
         EnhancedEventValidator.setupWindowMonitoring()
         // WindowOperationDetector is already a singleton and auto-initializes
-        os_log("Enhanced monitoring system initialized", log: .lifecycle, type: .info)
+        
+        // Initialize Easydict-style event monitor
+        EasydictEventMonitor.setup(with: self)
+        
+        os_log("Enhanced monitoring system initialized with Easydict detection", log: .lifecycle, type: .info)
     }
     
     func checkAccessibilityPermissions() -> Bool {
@@ -110,7 +114,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func setupTextSelectionMonitoring() {
-        let eventMask = (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.leftMouseUp.rawValue)
+        // Include drag events for Easydict-style sequence detection
+        let eventMask = (1 << CGEventType.leftMouseDown.rawValue) | 
+                       (1 << CGEventType.leftMouseUp.rawValue) |
+                       (1 << CGEventType.leftMouseDragged.rawValue)
         
         guard let eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -119,10 +126,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 let appDelegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
+                
+                // Route events to both old and new detection systems
                 if type == .leftMouseDown {
                     appDelegate.handleMouseDown(event: event)
+                    EasydictEventMonitor.handleLeftMouseDown(at: event.location)
+                } else if type == .leftMouseDragged {
+                    // New: Handle drag events for sequence analysis
+                    let nsEvent = NSEvent(cgEvent: event)!
+                    EasydictEventMonitor.handleLeftMouseDragged(at: event.location, event: nsEvent)
                 } else if type == .leftMouseUp {
                     appDelegate.handleMouseUp(event: event)
+                    EasydictEventMonitor.handleLeftMouseUp(at: event.location)
                 }
                 return Unmanaged.passUnretained(event)
             },
@@ -149,7 +164,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let currentTime = CFAbsoluteTimeGetCurrent()
         let mouseUpLocation = event.location
         
-        // Enhanced Feature 2: Double-click detection
+        // Check if Easydict detection should override traditional detection
+        if EasydictEventMonitor.shouldUseEasydictDetection() {
+            os_log("Using Easydict detection - skipping traditional validation", log: .textSelection, type: .info)
+            // Easydict monitor handles everything via delayed validation
+            resetTrackingVariables()
+            return
+        }
+        
+        // Enhanced Feature 2: Double-click detection (preserved for compatibility)
         let doubleClickDetected = detectDoubleClick(at: mouseUpLocation, time: currentTime)
         
         if doubleClickDetected {
@@ -174,7 +197,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
-        // Original drag detection logic
+        // Traditional detection (fallback when Easydict detection is not active)
         guard let mouseDownLoc = mouseDownLocation else {
             print("No mouse down location recorded")
             return
@@ -183,71 +206,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let distance = sqrt(pow(mouseUpLocation.x - mouseDownLoc.x, 2) + pow(mouseUpLocation.y - mouseDownLoc.y, 2))
         let timeDiff = currentTime - mouseDownTime
         
-        debugPrint("Mouse up at location: \(mouseUpLocation), distance: \(distance), time: \(timeDiff)")
+        debugPrint("Traditional detection - Mouse up at location: \(mouseUpLocation), distance: \(distance), time: \(timeDiff)")
         
-        // Enhanced Feature 3: Improved false positive prevention
-        if isLikelyUIInteraction(mouseDown: mouseDownLoc, mouseUp: mouseUpLocation, distance: distance) {
-            print("Detected UI interaction - not triggering text selection")
-            resetTrackingVariables()
-            return
-        }
+        // Simplified criteria to be less strict (closer to Easydict)
+        let shouldTrigger = distance > 1 || timeDiff > 0.1  // Much more lenient
         
-        // Multi-layered monitoring system integration
-        let gestureData = GestureData(
-            mouseDown: mouseDownLoc,
-            mouseUp: mouseUpLocation, 
-            duration: timeDiff,
-            distance: distance
-        )
-        
-        // Layer 1: Window operation detection
-        if WindowOperationDetector.shared.shouldSuppressPopup(for: gestureData) {
-            os_log("Popup suppressed by WindowOperationDetector", log: .validation, type: .info)
-            resetTrackingVariables()
-            return
-        }
-        
-        // Layer 2: Advanced drag operation classification
-        let dragResult = DragOperationClassifier.classifyDragOperation(gestureData)
-        if DragOperationClassifier.shouldSuppressPopup(dragResult) {
-            os_log("Popup suppressed by DragOperationClassifier: %{public}@", log: .validation, type: .info, dragResult.reason)
-            resetTrackingVariables()
-            return
-        }
-        
-        // Module 4: Enhanced event validation with multiple criteria
-        let originalCriteriaMet = distance > 5 || timeDiff > 0.3
-        
-        if originalCriteriaMet {
-            print("Original criteria met: distance=\(distance), time=\(timeDiff)")
+        if shouldTrigger {
+            os_log("Lenient criteria met: distance=%.1f, time=%.3f", log: .validation, type: .info, distance, timeDiff)
             
-            // Additional validation using EnhancedEventValidator
-            let enhancedValidation = EnhancedEventValidator.validateSelectionGesture(
-                mouseDown: mouseDownLoc,
-                mouseUp: mouseUpLocation,
-                duration: timeDiff,
-                distance: distance
-            )
-            
-            if enhancedValidation.isValid {
-                os_log("Enhanced validation passed: %{public}@", log: .validation, type: .info, enhancedValidation.reason)
-                os_log("Drag classification: %{public}@ (confidence: %.2f)", log: .validation, type: .info, 
-                       String(describing: dragResult.classification), dragResult.confidence)
-                print("Detected potential text selection (drag or long press)")
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    debugPrint("Preparing to get selected text...")
-                    guard let self = self else {
-                        print("AppDelegate has been released")
-                        return
-                    }
-                    self.getSelectedText(mouseUpLocation: mouseUpLocation, currentTime: currentTime)
+            DispatchQueue.main.asyncAfter(deadline: .now() + EasydictEventMonitor.kDelayGetSelectedTextTime) { [weak self] in
+                debugPrint("Delayed text extraction via traditional method...")
+                guard let self = self else {
+                    print("AppDelegate has been released")
+                    return
                 }
-            } else {
-                os_log("Enhanced validation failed: %{public}@", log: .validation, type: .info, enhancedValidation.reason)
+                self.getSelectedText(mouseUpLocation: mouseUpLocation, currentTime: currentTime)
             }
         } else {
-            print("Simple click detected, not checking for text selection")
+            os_log("Traditional criteria not met - ignoring", log: .validation, type: .debug)
         }
         
         resetTrackingVariables()
@@ -797,6 +773,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Cleanup multi-layered monitoring system
         EnhancedEventValidator.cleanup()
         WindowOperationDetector.shared.cleanup()
+        EasydictEventMonitor.cleanup()
         
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
