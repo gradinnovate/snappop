@@ -361,10 +361,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func toggleStartAtLogin() {
-        if isStartAtLoginEnabled() {
+        let currentStatus = isStartAtLoginEnabled()
+        os_log("Toggle start at login - current status: %{public}@", log: .lifecycle, type: .info, currentStatus ? "enabled" : "disabled")
+        
+        if currentStatus {
+            os_log("Attempting to disable start at login", log: .lifecycle, type: .info)
             disableStartAtLogin()
         } else {
+            os_log("Attempting to enable start at login", log: .lifecycle, type: .info)
             enableStartAtLogin()
+        }
+        
+        // Refresh menu to update the checkmark state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            let newStatus = self?.isStartAtLoginEnabled() ?? false
+            os_log("After toggle - new status: %{public}@", log: .lifecycle, type: .info, newStatus ? "enabled" : "disabled")
+            self?.refreshStatusMenu()
         }
     }
     
@@ -422,7 +434,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func enableStartAtLogin() {
-        let sourcePlistPath = Bundle.main.bundlePath + "/../com.gradinnovate.snappop.plist"
         let launchAgentsDir = NSHomeDirectory() + "/Library/LaunchAgents"
         let targetPlistPath = launchAgentsDir + "/com.gradinnovate.snappop.plist"
         
@@ -430,27 +441,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Create LaunchAgents directory if it doesn't exist
             try FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
             
-            // Copy plist file
-            if FileManager.default.fileExists(atPath: sourcePlistPath) {
-                try FileManager.default.copyItem(atPath: sourcePlistPath, toPath: targetPlistPath)
-            } else {
-                // Create plist content manually if source doesn't exist
-                createLoginPlist(at: targetPlistPath)
-            }
+            // Always create plist content manually to ensure correct paths
+            createLoginPlist(at: targetPlistPath)
             
             // Load the launch agent
             let task = Process()
             task.launchPath = "/bin/launchctl"
             task.arguments = ["load", targetPlistPath]
+            
+            let pipe = Pipe()
+            task.standardError = pipe
             task.launch()
             task.waitUntilExit()
             
-            os_log("Start at login enabled", log: .lifecycle, type: .info)
+            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
             
-            let alert = NSAlert()
-            alert.messageText = "Start at Login Enabled"
-            alert.informativeText = "SnapPop will now start automatically when you log in."
-            alert.runModal()
+            if task.terminationStatus == 0 {
+                os_log("Start at login enabled successfully", log: .lifecycle, type: .info)
+                showTemporaryNotification("Start at Login Enabled", "SnapPop will start when you log in")
+            } else {
+                os_log("launchctl load failed: %{public}@", log: .lifecycle, type: .error, errorOutput)
+                showTemporaryNotification("Warning", "Start at login enabled but may need restart")
+            }
             
         } catch {
             os_log("Failed to enable start at login: %{public}@", log: .lifecycle, type: .error, error.localizedDescription)
@@ -465,25 +478,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func disableStartAtLogin() {
         let targetPlistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.gradinnovate.snappop.plist"
         
+        // Check if file exists first
+        guard FileManager.default.fileExists(atPath: targetPlistPath) else {
+            os_log("Start at login plist not found, already disabled", log: .lifecycle, type: .info)
+            showTemporaryNotification("Already Disabled", "Start at login was not enabled")
+            return
+        }
+        
         do {
             // Unload the launch agent
             let task = Process()
             task.launchPath = "/bin/launchctl"
             task.arguments = ["unload", targetPlistPath]
+            
+            let pipe = Pipe()
+            task.standardError = pipe
             task.launch()
             task.waitUntilExit()
             
-            // Remove plist file
-            if FileManager.default.fileExists(atPath: targetPlistPath) {
-                try FileManager.default.removeItem(atPath: targetPlistPath)
+            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
+            let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+            
+            // Remove plist file regardless of unload result
+            try FileManager.default.removeItem(atPath: targetPlistPath)
+            
+            if task.terminationStatus == 0 || errorOutput.contains("Could not find specified service") {
+                os_log("Start at login disabled successfully", log: .lifecycle, type: .info)
+                showTemporaryNotification("Start at Login Disabled", "SnapPop will not start automatically")
+            } else {
+                os_log("launchctl unload warning: %{public}@", log: .lifecycle, type: .default, errorOutput)
+                showTemporaryNotification("Start at Login Disabled", "Plist removed, may need logout/login")
             }
-            
-            os_log("Start at login disabled", log: .lifecycle, type: .info)
-            
-            let alert = NSAlert()
-            alert.messageText = "Start at Login Disabled"
-            alert.informativeText = "SnapPop will no longer start automatically when you log in."
-            alert.runModal()
             
         } catch {
             os_log("Failed to disable start at login: %{public}@", log: .lifecycle, type: .error, error.localizedDescription)
