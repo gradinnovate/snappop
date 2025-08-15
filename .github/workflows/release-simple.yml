@@ -1,4 +1,4 @@
-name: Release
+name: Simple Release
 
 on:
   push:
@@ -11,17 +11,16 @@ on:
         required: true
         default: '1.2.0'
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release:
     runs-on: macos-latest
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Xcode
-      uses: maxim-lobanov/setup-xcode@v1
-      with:
-        xcode-version: latest-stable
+    - name: Checkout code
+      uses: actions/checkout@v4
     
     - name: Get version
       id: version
@@ -32,19 +31,18 @@ jobs:
           echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         fi
     
-    - name: Build SnapPop
+    - name: Build application
       run: |
+        chmod +x build.sh
         ./build.sh
         
         # Update version in Info.plist
         plutil -replace CFBundleShortVersionString -string "${{ steps.version.outputs.VERSION }}" "SnapPop.app/Contents/Info.plist"
         plutil -replace CFBundleVersion -string "${{ steps.version.outputs.VERSION }}" "SnapPop.app/Contents/Info.plist"
     
-    - name: Create ZIP archive
+    - name: Create archive
       run: |
         zip -r "SnapPop-${{ steps.version.outputs.VERSION }}.zip" "SnapPop.app"
-        
-        # Calculate SHA256
         echo "SHA256=$(shasum -a 256 SnapPop-${{ steps.version.outputs.VERSION }}.zip | cut -d ' ' -f 1)" >> $GITHUB_ENV
     
     - name: Create Release
@@ -55,17 +53,11 @@ jobs:
         body: |
           ## SnapPop v${{ steps.version.outputs.VERSION }}
           
-          ### 🎉 Features
-          - PopClip-like text selection detection
-          - Multiple detection modes (Easydict, Hybrid, Traditional, Adaptive)
-          - Start at login functionality
-          - Pause/resume monitoring
-          - Crash auto-restart
-          - Enhanced accessibility permission handling
+          PopClip-like text selection utility for macOS with advanced detection modes.
           
           ### 📦 Installation
           
-          #### Via Homebrew (Recommended)
+          #### Via Homebrew
           ```bash
           brew install --cask snappop
           ```
@@ -77,22 +69,20 @@ jobs:
           
           ### 🔧 Requirements
           - macOS 10.15 or later
-          - Accessibility permissions
+          - Accessibility permissions required
           
-          ### 📊 SHA256
+          ### ✨ Features
+          - Multiple text selection detection modes
+          - Start at login functionality  
+          - Pause/resume monitoring
+          - Crash auto-restart
+          - Enhanced permission handling
+          
+          ### 📊 Checksums
           ```
-          ${{ env.SHA256 }}
+          SHA256: ${{ env.SHA256 }}
           ```
         files: |
           SnapPop-${{ steps.version.outputs.VERSION }}.zip
         draft: false
         prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Output Homebrew Info
-      run: |
-        echo "## 🍺 Homebrew Cask Formula Update"
-        echo "Version: ${{ steps.version.outputs.VERSION }}"
-        echo "SHA256: ${{ env.SHA256 }}"
-        echo "URL: https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/SnapPop-${{ steps.version.outputs.VERSION }}.zip"
