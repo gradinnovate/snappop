@@ -35,18 +35,30 @@ SnapPop是一個macOS實用工具，模仿PopClip功能，通過檢測文本選�
 
 ## 安裝
 
-### 自動安裝
+### 🍺 Homebrew（推薦）
 ```bash
-./install.sh
+# 一旦發布到官方homebrew-cask
+brew install --cask snappop
 ```
 
-### 手動安裝
-1. 構建應用程式：
-   ```bash
-   ./build.sh
-   ```
-2. 將 `SnapPop.app` 複製到 `/Applications/`
-3. 從應用程式文件夾啟動
+### 📦 手動下載
+1. 從 [GitHub Releases](https://github.com/YOUR_USERNAME/snappop/releases) 下載最新版本
+2. 解壓 `SnapPop-x.x.x.zip`
+3. 將 `SnapPop.app` 移動到 `/Applications/`
+4. 啟動並授予權限
+
+### 🔨 從源碼構建
+```bash
+# 克隆倉庫
+git clone https://github.com/YOUR_USERNAME/snappop.git
+cd snappop
+
+# 構建
+./build.sh
+
+# 安裝
+./install.sh
+```
 
 ## 使用方法
 
