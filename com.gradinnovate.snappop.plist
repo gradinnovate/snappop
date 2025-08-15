@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gradinnovate.snappop</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/SnapPop.app/Contents/MacOS/SnapPop</string>
+    </array>
+    
+    <!-- 自動重啟設置 -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    
+    <!-- 開機啟動 -->
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <!-- 限制重啟頻率 -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    
+    <!-- 設置工作目錄 -->
+    <key>WorkingDirectory</key>
+    <string>/Applications</string>
+    
+    <!-- 日誌輸出 -->
+    <key>StandardOutPath</key>
+    <string>/tmp/snappop.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/snappop.error.log</string>
+    
+    <!-- 環境變量 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

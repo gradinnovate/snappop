@@ -33,15 +33,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var isCreatingPopup: Bool = false
     private let popupCreationQueue = DispatchQueue(label: "com.snappop.popup", qos: .userInteractive)
     
+    // Monitoring control
+    private var isMonitoringEnabled: Bool = true
+    private var isMonitoringPaused: Bool = false
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Always setup status item first
+        setupStatusItem()
+        
         if !checkAccessibilityPermissions() {
+            // Show alert on first launch or when permission is revoked
             showAccessibilityAlert()
             return
         }
         
-        setupStatusItem()
+        // Only setup monitoring if we have permissions
         setupTextSelectionMonitoring()
         setupEnhancedMonitoring()
+        
+        os_log("SnapPop launched successfully with full functionality", log: .lifecycle, type: .info)
     }
     
     func setupEnhancedMonitoring() {
@@ -61,45 +71,212 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func showAccessibilityAlert() {
         let alert = NSAlert()
-        alert.messageText = "Accessibility Permission Required"
-        alert.informativeText = "Please go to System Preferences > Security & Privacy > Privacy > Accessibility and add this application."
+        alert.messageText = "SnapPop Needs Accessibility Permission"
+        alert.informativeText = """
+        SnapPop requires accessibility permission to detect text selections across all applications.
+        
+        Steps to grant permission:
+        1. Click "Open System Preferences" below
+        2. Unlock the settings if needed (click the lock icon)
+        3. Find "SnapPop" in the list and check the box next to it
+        4. Restart SnapPop
+        
+        This permission allows SnapPop to monitor mouse events and read selected text.
+        """
+        
         alert.addButton(withTitle: "Open System Preferences")
-        alert.addButton(withTitle: "Later")
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Continue Without Permission")
+        
+        // Set alert as critical to ensure it appears on top
+        alert.alertStyle = .critical
         
         let response = alert.runModal()
+        
         if response == .alertFirstButtonReturn {
-            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            // Open System Preferences to Accessibility panel
+            openAccessibilityPreferences()
+            
+            // Start a timer to check periodically if permission is granted
+            startPermissionMonitoring()
+            
+        } else if response == .alertSecondButtonReturn {
+            // User chose to quit
+            NSApplication.shared.terminate(nil)
+            
+        } else if response == .alertThirdButtonReturn {
+            // User chose to continue without permission
+            showLimitedFunctionalityWarning()
         }
-        NSApplication.shared.terminate(nil)
+    }
+    
+    private func openAccessibilityPreferences() {
+        // Try multiple methods to open accessibility preferences
+        let accessibilityURLs = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.preferences.security.privacy?Privacy_Accessibility"
+        ]
+        
+        var opened = false
+        for urlString in accessibilityURLs {
+            if let url = URL(string: urlString) {
+                if NSWorkspace.shared.open(url) {
+                    opened = true
+                    break
+                }
+            }
+        }
+        
+        if !opened {
+            // Fallback: open general Security & Privacy preferences
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
+                NSWorkspace.shared.open(url)
+            }
+            
+            // Show additional instructions
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                let instructionAlert = NSAlert()
+                instructionAlert.messageText = "Manual Navigation Required"
+                instructionAlert.informativeText = """
+                Please navigate manually to:
+                Privacy → Accessibility
+                
+                Then add SnapPop to the list and enable it.
+                """
+                instructionAlert.runModal()
+            }
+        }
+    }
+    
+    private func startPermissionMonitoring() {
+        // Check every 3 seconds if permission is granted
+        Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            
+            if self.checkAccessibilityPermissions() {
+                timer.invalidate()
+                self.onAccessibilityPermissionGranted()
+            }
+        }
+    }
+    
+    private func onAccessibilityPermissionGranted() {
+        let successAlert = NSAlert()
+        successAlert.messageText = "Permission Granted!"
+        successAlert.informativeText = "SnapPop can now monitor text selections. The application will start working immediately."
+        successAlert.addButton(withTitle: "Great!")
+        successAlert.alertStyle = .informational
+        successAlert.runModal()
+        
+        // Initialize monitoring now that we have permission
+        setupTextSelectionMonitoring()
+        setupEnhancedMonitoring()
+        
+        os_log("Accessibility permission granted, monitoring started", log: .lifecycle, type: .info)
+    }
+    
+    private func showLimitedFunctionalityWarning() {
+        let warningAlert = NSAlert()
+        warningAlert.messageText = "Limited Functionality"
+        warningAlert.informativeText = """
+        Without accessibility permission, SnapPop cannot:
+        • Detect text selections in other applications
+        • Show popup menus for selected text
+        • Monitor mouse events globally
+        
+        You can grant permission later through the status bar menu.
+        """
+        warningAlert.addButton(withTitle: "OK")
+        warningAlert.alertStyle = .warning
+        warningAlert.runModal()
+        
+        // Still setup status bar but with limited functionality
+        setupStatusItem()
+        
+        os_log("Running with limited functionality - no accessibility permission", log: .lifecycle, type: .default)
     }
     
     func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem?.menu = createStatusMenu()
+        
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "selection.pin.in.out", accessibilityDescription: "SnapPop")
-            button.action = #selector(statusItemClicked)
-            button.target = self
         }
+        
+        // Also set initial icon state
+        updateStatusBarIcon()
     }
     
-    @objc func statusItemClicked() {
-        // Create a simple menu instead of terminating the app
+    func createStatusMenu() -> NSMenu {
         let menu = NSMenu()
         
+        // Status information
+        let statusTitle = isMonitoringPaused ? "SnapPop (Paused)" : "SnapPop (Active)"
+        let statusMenuItem = NSMenuItem(title: statusTitle, action: nil, keyEquivalent: "")
+        statusMenuItem.isEnabled = false
+        menu.addItem(statusMenuItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Pause/Resume monitoring (always show, regardless of permission status)
+        let monitoringAction = isMonitoringPaused ? "▶️ Resume Monitoring" : "⏸️ Pause Monitoring"
+        let monitoringItem = NSMenuItem(title: monitoringAction, action: #selector(toggleMonitoring), keyEquivalent: "")
+        monitoringItem.target = self
+        
+        // Disable if no accessibility permission
+        if !checkAccessibilityPermissions() {
+            monitoringItem.isEnabled = false
+        }
+        
+        menu.addItem(monitoringItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Start at login
+        let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = isStartAtLoginEnabled() ? .on : .off
+        menu.addItem(loginItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Accessibility permission status
+        if !checkAccessibilityPermissions() {
+            let permissionItem = NSMenuItem(title: "⚠️ Grant Accessibility Permission", action: #selector(requestAccessibilityPermission), keyEquivalent: "")
+            permissionItem.target = self
+            menu.addItem(permissionItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+        
+        // Configuration
+        let configItem = NSMenuItem(title: "Detection Settings...", action: #selector(showDetectionSettings), keyEquivalent: "")
+        configItem.target = self
+        menu.addItem(configItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // About
         let aboutItem = NSMenuItem(title: "About SnapPop", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
         
         menu.addItem(NSMenuItem.separator())
         
+        // Quit
         let quitItem = NSMenuItem(title: "Quit SnapPop", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
         
-        // Show the menu
-        statusItem?.menu = menu
-        statusItem?.button?.performClick(nil)
-        statusItem?.menu = nil
+        return menu
+    }
+    
+    func refreshStatusMenu() {
+        // Update the menu with current state
+        statusItem?.menu = createStatusMenu()
     }
     
     @objc func showAbout() {
@@ -112,6 +289,243 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc func quitApp() {
         NSApplication.shared.terminate(nil)
+    }
+    
+    // MARK: - Enhanced Menu Actions
+    
+    @objc func toggleMonitoring() {
+        // Check accessibility permission first
+        guard checkAccessibilityPermissions() else {
+            let alert = NSAlert()
+            alert.messageText = "Accessibility Permission Required"
+            alert.informativeText = "SnapPop needs accessibility permission to monitor text selections. Please grant permission first."
+            alert.addButton(withTitle: "Grant Permission")
+            alert.addButton(withTitle: "Cancel")
+            
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                requestAccessibilityPermission()
+            }
+            return
+        }
+        
+        isMonitoringPaused.toggle()
+        
+        if isMonitoringPaused {
+            // Disable event monitoring
+            if let eventTap = eventTap {
+                CGEvent.tapEnable(tap: eventTap, enable: false)
+            }
+            // Hide any existing popup
+            hidePopupMenu()
+            // Update status bar icon to indicate paused state
+            updateStatusBarIcon()
+            os_log("Text selection monitoring paused", log: .lifecycle, type: .info)
+            
+            // Show confirmation
+            showTemporaryNotification("Monitoring Paused", "Text selection detection is now disabled.")
+            
+        } else {
+            // Re-enable event monitoring
+            if let eventTap = eventTap {
+                CGEvent.tapEnable(tap: eventTap, enable: true)
+            } else {
+                // Re-setup monitoring if needed
+                setupTextSelectionMonitoring()
+                setupEnhancedMonitoring()
+            }
+            updateStatusBarIcon()
+            os_log("Text selection monitoring resumed", log: .lifecycle, type: .info)
+            
+            // Show confirmation
+            showTemporaryNotification("Monitoring Resumed", "Text selection detection is now active.")
+        }
+        
+        // Refresh the menu to update the button text and state
+        refreshStatusMenu()
+    }
+    
+    private func showTemporaryNotification(_ title: String, _ message: String) {
+        // Show a brief, non-blocking notification
+        os_log("%{public}@: %{public}@", log: .lifecycle, type: .info, title, message)
+        
+        // Update status bar tooltip to show the notification
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem?.button?.toolTip = "\(title): \(message)"
+            
+            // Clear tooltip after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.statusItem?.button?.toolTip = "SnapPop - Text Selection Helper"
+            }
+        }
+    }
+    
+    @objc func toggleStartAtLogin() {
+        if isStartAtLoginEnabled() {
+            disableStartAtLogin()
+        } else {
+            enableStartAtLogin()
+        }
+    }
+    
+    @objc func requestAccessibilityPermission() {
+        showAccessibilityAlert()
+    }
+    
+    @objc func showDetectionSettings() {
+        let alert = NSAlert()
+        alert.messageText = "Detection Settings"
+        
+        // Get current configuration
+        let config = EasydictConfiguration.self
+        let currentMode = config.detectionMode.displayName
+        let currentSensitivity = config.sensitivity
+        
+        alert.informativeText = """
+        Current Detection Mode: \(currentMode)
+        Sensitivity: \(String(format: "%.1f", currentSensitivity))
+        
+        Available Modes:
+        • Easydict (Pure Event Sequence) - Most responsive
+        • Hybrid (Easydict + Validation) - Balanced approach  
+        • Traditional (Distance + Time) - Most conservative
+        • Adaptive (Auto-Select Best) - Smart selection
+        
+        Use command line to change settings:
+        defaults write com.gradinnovate.snappop SnapPopDetectionMode "easydict"
+        defaults write com.gradinnovate.snappop SnapPopSensitivity 1.5
+        """
+        
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Reset to Default")
+        
+        let response = alert.runModal()
+        if response == .alertSecondButtonReturn {
+            // Reset to default settings
+            config.detectionMode = .easydictOnly
+            config.sensitivity = 1.0
+            config.logCurrentConfiguration()
+        }
+    }
+    
+    private func updateStatusBarIcon() {
+        let iconName = isMonitoringPaused ? "pause.circle" : "selection.pin.in.out"
+        statusItem?.button?.image = NSImage(systemSymbolName: iconName, accessibilityDescription: "SnapPop")
+    }
+    
+    // MARK: - Login Item Management
+    
+    private func isStartAtLoginEnabled() -> Bool {
+        // Check if the launchd plist exists in user's LaunchAgents directory
+        let launchAgentsPath = NSHomeDirectory() + "/Library/LaunchAgents/com.gradinnovate.snappop.plist"
+        return FileManager.default.fileExists(atPath: launchAgentsPath)
+    }
+    
+    private func enableStartAtLogin() {
+        let sourcePlistPath = Bundle.main.bundlePath + "/../com.gradinnovate.snappop.plist"
+        let launchAgentsDir = NSHomeDirectory() + "/Library/LaunchAgents"
+        let targetPlistPath = launchAgentsDir + "/com.gradinnovate.snappop.plist"
+        
+        do {
+            // Create LaunchAgents directory if it doesn't exist
+            try FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
+            
+            // Copy plist file
+            if FileManager.default.fileExists(atPath: sourcePlistPath) {
+                try FileManager.default.copyItem(atPath: sourcePlistPath, toPath: targetPlistPath)
+            } else {
+                // Create plist content manually if source doesn't exist
+                createLoginPlist(at: targetPlistPath)
+            }
+            
+            // Load the launch agent
+            let task = Process()
+            task.launchPath = "/bin/launchctl"
+            task.arguments = ["load", targetPlistPath]
+            task.launch()
+            task.waitUntilExit()
+            
+            os_log("Start at login enabled", log: .lifecycle, type: .info)
+            
+            let alert = NSAlert()
+            alert.messageText = "Start at Login Enabled"
+            alert.informativeText = "SnapPop will now start automatically when you log in."
+            alert.runModal()
+            
+        } catch {
+            os_log("Failed to enable start at login: %{public}@", log: .lifecycle, type: .error, error.localizedDescription)
+            
+            let alert = NSAlert()
+            alert.messageText = "Error"
+            alert.informativeText = "Failed to enable start at login: \(error.localizedDescription)"
+            alert.runModal()
+        }
+    }
+    
+    private func disableStartAtLogin() {
+        let targetPlistPath = NSHomeDirectory() + "/Library/LaunchAgents/com.gradinnovate.snappop.plist"
+        
+        do {
+            // Unload the launch agent
+            let task = Process()
+            task.launchPath = "/bin/launchctl"
+            task.arguments = ["unload", targetPlistPath]
+            task.launch()
+            task.waitUntilExit()
+            
+            // Remove plist file
+            if FileManager.default.fileExists(atPath: targetPlistPath) {
+                try FileManager.default.removeItem(atPath: targetPlistPath)
+            }
+            
+            os_log("Start at login disabled", log: .lifecycle, type: .info)
+            
+            let alert = NSAlert()
+            alert.messageText = "Start at Login Disabled"
+            alert.informativeText = "SnapPop will no longer start automatically when you log in."
+            alert.runModal()
+            
+        } catch {
+            os_log("Failed to disable start at login: %{public}@", log: .lifecycle, type: .error, error.localizedDescription)
+            
+            let alert = NSAlert()
+            alert.messageText = "Error"
+            alert.informativeText = "Failed to disable start at login: \(error.localizedDescription)"
+            alert.runModal()
+        }
+    }
+    
+    private func createLoginPlist(at path: String) {
+        let appPath = Bundle.main.bundlePath
+        let executablePath = appPath + "/Contents/MacOS/SnapPop"
+        
+        let plistContent = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>com.gradinnovate.snappop</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>\(executablePath)</string>
+            </array>
+            <key>KeepAlive</key>
+            <dict>
+                <key>Crashed</key>
+                <true/>
+                <key>SuccessfulExit</key>
+                <false/>
+            </dict>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>ThrottleInterval</key>
+            <integer>10</integer>
+        </dict>
+        </plist>
+        """
+        
+        try? plistContent.write(to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8)
     }
     
     func setupTextSelectionMonitoring() {
@@ -156,12 +570,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func handleMouseDown(event: CGEvent) {
+        // Check if monitoring is paused
+        guard !isMonitoringPaused else { return }
+        
         mouseDownLocation = event.location
         mouseDownTime = CFAbsoluteTimeGetCurrent()
         debugPrint("Mouse down at location: \(mouseDownLocation!)")
     }
     
     func handleMouseUp(event: CGEvent) {
+        // Check if monitoring is paused
+        guard !isMonitoringPaused else { return }
+        
         let currentTime = CFAbsoluteTimeGetCurrent()
         let mouseUpLocation = event.location
         
