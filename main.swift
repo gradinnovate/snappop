@@ -38,6 +38,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var isMonitoringPaused: Bool = false
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Check for existing instances and prevent duplicates
+        let runningApps = NSWorkspace.shared.runningApplications
+        let snapPopInstances = runningApps.filter { app in
+            (app.bundleIdentifier == "com.gradinnovate.snappop" || 
+             app.localizedName == "SnapPop") && 
+            app.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        }
+        
+        if !snapPopInstances.isEmpty {
+            os_log("Another SnapPop instance is already running, exiting...", log: .lifecycle, type: .info)
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        
         // Always setup status item first
         setupStatusItem()
         
@@ -444,25 +458,38 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Always create plist content manually to ensure correct paths
             createLoginPlist(at: targetPlistPath)
             
-            // Load the launch agent
-            let task = Process()
-            task.launchPath = "/bin/launchctl"
-            task.arguments = ["load", targetPlistPath]
+            // Check if there's already a running instance and prevent duplicate launch
+            let runningApps = NSWorkspace.shared.runningApplications
+            let snapPopRunning = runningApps.contains { app in
+                app.bundleIdentifier == "com.gradinnovate.snappop" || 
+                app.localizedName == "SnapPop"
+            }
             
-            let pipe = Pipe()
-            task.standardError = pipe
-            task.launch()
-            task.waitUntilExit()
-            
-            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-            
-            if task.terminationStatus == 0 {
-                os_log("Start at login enabled successfully", log: .lifecycle, type: .info)
-                showTemporaryNotification("Start at Login Enabled", "SnapPop will start when you log in")
+            if snapPopRunning {
+                // If SnapPop is already running, just register the plist without loading
+                os_log("SnapPop already running, plist created but not loaded to prevent duplicate", log: .lifecycle, type: .info)
+                showTemporaryNotification("Start at Login Enabled", "Will start when you log in (current instance continues)")
             } else {
-                os_log("launchctl load failed: %{public}@", log: .lifecycle, type: .error, errorOutput)
-                showTemporaryNotification("Warning", "Start at login enabled but may need restart")
+                // Safe to load since no instance is running
+                let task = Process()
+                task.launchPath = "/bin/launchctl"
+                task.arguments = ["load", targetPlistPath]
+                
+                let pipe = Pipe()
+                task.standardError = pipe
+                task.launch()
+                task.waitUntilExit()
+                
+                let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
+                let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+                
+                if task.terminationStatus == 0 {
+                    os_log("Start at login enabled successfully", log: .lifecycle, type: .info)
+                    showTemporaryNotification("Start at Login Enabled", "SnapPop will start when you log in")
+                } else {
+                    os_log("launchctl load failed: %{public}@", log: .lifecycle, type: .error, errorOutput)
+                    showTemporaryNotification("Warning", "Start at login enabled but may need restart")
+                }
             }
             
         } catch {
@@ -535,17 +562,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             <array>
                 <string>\(executablePath)</string>
             </array>
-            <key>KeepAlive</key>
-            <dict>
-                <key>Crashed</key>
-                <true/>
-                <key>SuccessfulExit</key>
-                <false/>
-            </dict>
             <key>RunAtLoad</key>
             <true/>
-            <key>ThrottleInterval</key>
-            <integer>10</integer>
+            <key>LaunchOnlyOnce</key>
+            <true/>
         </dict>
         </plist>
         """
