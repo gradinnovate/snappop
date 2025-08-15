@@ -27,6 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastClickTime: CFTimeInterval = 0
     private var lastClickLocation: CGPoint = CGPoint.zero
     private var clickCount: Int = 0
+    private var lastDoubleClickTime: CFTimeInterval = 0  // Prevent rapid double-clicks
     
     // Segfault fix: Prevent multiple concurrent popup creations
     private var isCreatingPopup: Bool = false
@@ -164,36 +165,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let currentTime = CFAbsoluteTimeGetCurrent()
         let mouseUpLocation = event.location
         
-        // Check if Easydict detection should override traditional detection
-        if EasydictEventMonitor.shouldUseEasydictDetection() {
-            os_log("Using Easydict detection - skipping traditional validation", log: .textSelection, type: .info)
-            // Easydict monitor handles everything via delayed validation
-            resetTrackingVariables()
-            return
-        }
-        
-        // Enhanced Feature 2: Double-click detection (preserved for compatibility)
+        // Enhanced Feature 2: Double-click detection (ALWAYS check first, regardless of detection mode)
         let doubleClickDetected = detectDoubleClick(at: mouseUpLocation, time: currentTime)
         
         if doubleClickDetected {
             debugPrint("Double-click detected at \(mouseUpLocation) - triggering text selection")
             
-            // Segfault fix: Check if popup is already being created OR already visible
+            // Enhanced segfault protection for double-click
             if isCreatingPopup {
-                os_log("Popup creation in progress, skipping double-click", log: .popup, type: .info)
+                os_log("Popup creation in progress, ignoring double-click", log: .popup, type: .info)
+                resetTrackingVariables()
                 return
             }
             
-            // CRITICAL: If popup is already visible, ignore double-click completely to prevent segfault
-            if let existingPopup = popupWindow, existingPopup.isVisible {
-                debugPrint("🔧 DEBUG: Popup already visible, ignoring double-click to prevent segfault")
-                return
+            // CRITICAL: More aggressive popup state checking
+            if let existingPopup = popupWindow {
+                if existingPopup.isVisible {
+                    debugPrint("🔧 DEBUG: Popup visible, ignoring double-click to prevent segfault")
+                    resetTrackingVariables()
+                    return
+                }
+                
+                // Force close any existing popup immediately
+                debugPrint("🔧 DEBUG: Force closing existing popup for double-click")
+                popupWindow = nil
+                existingPopup.orderOut(nil)
             }
             
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            // Set creation flag immediately to prevent race conditions
+            isCreatingPopup = true
+            
+            // Increased delay for double-click to prevent rapid-fire segfaults
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 debugPrint("Preparing to get selected text from double-click...")
                 self?.getSelectedTextForDoubleClick()
             }
+            return
+        }
+        
+        // Check detection mode after double-click handling
+        if EasydictEventMonitor.shouldUseEasydictDetection() {
+            os_log("Using Easydict detection - skipping traditional validation", log: .textSelection, type: .info)
+            // Easydict monitor handles drag-based selection via delayed validation
+            resetTrackingVariables()
             return
         }
         
@@ -358,17 +372,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // Enhanced method for double-click: more lenient validation
     func getSelectedTextForDoubleClick() {
-        // Additional safety check
+        debugPrint("🔧 DEBUG: getSelectedTextForDoubleClick called")
+        
+        // CRITICAL: Additional safety checks for double-click
         if isCreatingPopup {
-            print("Popup creation already in progress, skipping double-click text selection")
+            debugPrint("🔧 DEBUG: Popup creation already in progress, skipping double-click text selection")
+            isCreatingPopup = false // Reset flag to prevent stuck state
             return
         }
         
-        if let text = getSelectedTextViaAccessibility(), !text.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines) != "" {
-            debugPrint("Double-click text selection successful: \(text.prefix(50))...")
-            self.showPopupMenu(for: text)
-        } else {
-            debugPrint("Double-click detected but no text selected")
+        // Check if popup already exists and is visible
+        if let existingPopup = popupWindow, existingPopup.isVisible {
+            debugPrint("🔧 DEBUG: Popup already visible, ignoring double-click to prevent segfault")
+            return
+        }
+        
+        // Use the same thread-safe approach as regular text selection
+        popupCreationQueue.async { [weak self] in
+            debugPrint("🔧 DEBUG: Double-click text extraction in queue")
+            guard let self = self else { 
+                debugPrint("🔧 DEBUG: self is nil in double-click queue")
+                return 
+            }
+            
+            // Double-check creation flag in queue
+            if self.isCreatingPopup {
+                debugPrint("🔧 DEBUG: Creation flag set in queue, skipping double-click")
+                return
+            }
+            
+            // Set creation flag to prevent concurrent access
+            self.isCreatingPopup = true
+            
+            if let text = self.getSelectedTextViaAccessibility(), !text.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines) != "" {
+                debugPrint("🔧 DEBUG: Double-click text selection successful: \(text.prefix(50))...")
+                
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { 
+                        debugPrint("🔧 DEBUG: self is nil in double-click main async")
+                        return 
+                    }
+                    self.showPopupMenu(for: text)
+                }
+            } else {
+                debugPrint("🔧 DEBUG: Double-click detected but no text selected")
+                // Reset flag if no text found
+                DispatchQueue.main.async { [weak self] in
+                    self?.isCreatingPopup = false
+                }
+            }
         }
     }
     
@@ -891,6 +943,9 @@ class PopupMenuWindow: NSWindow {
     // Module 5: Enhanced dismissal management
     private var dismissalManager: PopupDismissalManager?
     
+    // Track window closing state to prevent race conditions
+    private var isClosing: Bool = false
+    
     init(selectedText: String) {
         debugPrint("🔧 DEBUG: PopupMenuWindow.init called")
         self.selectedText = selectedText
@@ -932,22 +987,65 @@ class PopupMenuWindow: NSWindow {
         }
     }
     
-    // Module 5: Enhanced dismissal setup
+    // Module 5: Enhanced dismissal setup with safety checks
     func setupEnhancedDismissal() {
-        dismissalManager = PopupDismissalManager(popupWindow: self)
+        // Prevent creating dismissal manager if window is already being closed
+        guard !isClosing else {
+            debugPrint("🔧 DEBUG: Window is closing, skipping dismissal manager setup")
+            return
+        }
+        
+        // Only create dismissal manager if one doesn't already exist
+        if dismissalManager == nil {
+            debugPrint("🔧 DEBUG: Creating PopupDismissalManager")
+            dismissalManager = PopupDismissalManager(popupWindow: self)
+        } else {
+            debugPrint("🔧 DEBUG: PopupDismissalManager already exists, skipping creation")
+        }
     }
     
     override func close() {
         print("close() called")
         
+        // Thread safety for close operation
+        objc_sync_enter(self)
+        defer { objc_sync_exit(self) }
+        
+        // Prevent multiple close calls
+        guard !isVisible || alphaValue > 0 else {
+            print("Window already closed, skipping")
+            return
+        }
+        
         // CRITICAL: Clean up dismissal manager FIRST to remove event monitors
-        dismissalManager?.cleanup()
-        dismissalManager = nil
+        if let manager = dismissalManager {
+            manager.cleanup()
+            dismissalManager = nil
+        }
         
-        timeoutTimer?.invalidate()
-        timeoutTimer = nil
+        // Clean up timer safely
+        if let timer = timeoutTimer {
+            timer.invalidate()
+            timeoutTimer = nil
+        }
         
-        super.close()
+        // Clear buttons array to break potential retain cycles
+        buttons.removeAll()
+        
+        // Use orderOut first for safer window closing
+        self.orderOut(nil)
+        
+        // Then call super.close() on main thread with delay to ensure cleanup
+        DispatchQueue.main.async { [weak self] in
+            self?.performSuperClose()
+        }
+    }
+    
+    private func performSuperClose() {
+        guard let window = self as NSWindow? else { return }
+        if window.isVisible {
+            super.close()
+        }
     }
     
     deinit {
@@ -1113,9 +1211,19 @@ class PopupMenuWindow: NSWindow {
     }
     
     func closeAndNotify() {
+        // Set closing flag to prevent race conditions
+        isClosing = true
+        
         // Clean up timer first
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        
+        // Clean up dismissal manager safely before window closure
+        if let manager = dismissalManager {
+            debugPrint("🔧 DEBUG: Cleaning up dismissal manager before window closure")
+            manager.cleanup()
+            dismissalManager = nil
+        }
         
         // Notify AppDelegate to clear reference
         if let appDelegate = NSApplication.shared.delegate as? AppDelegate {

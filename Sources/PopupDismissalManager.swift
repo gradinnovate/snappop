@@ -88,37 +88,47 @@ class PopupDismissalManager {
     func cleanup() {
         debugPrint("🔧 DEBUG: PopupDismissalManager cleanup called, isCleanedUp: \(isCleanedUp)")
         
-        // Prevent double cleanup
+        // Enhanced thread safety with additional checks
+        objc_sync_enter(self)
+        defer { objc_sync_exit(self) }
+        
         guard !isCleanedUp else {
             debugPrint("🔧 DEBUG: Already cleaned up, skipping...")
             return
         }
         
         isCleanedUp = true
-        isDismissing = false // Reset dismissal flag
+        isDismissing = false
         
-        // CRITICAL: Clear window reference FIRST to prevent access during cleanup
+        // CRITICAL: Store monitor references locally before clearing to prevent race conditions
+        let scrollMonitorToRemove = scrollMonitor
+        let mouseMoveMonitorToRemove = mouseMoveMonitor
+        let keyMonitorToRemove = keyMonitor
+        
+        // Clear all references immediately
+        scrollMonitor = nil
+        mouseMoveMonitor = nil
+        keyMonitor = nil
         popupWindow = nil
         
-        // Remove monitors with additional safety checks
-        if let monitor = scrollMonitor {
-            debugPrint("🔧 DEBUG: Removing scroll monitor")
-            NSEvent.removeMonitor(monitor)
-            scrollMonitor = nil
+        // Remove monitors safely with local references
+        DispatchQueue.main.async {
+            if let monitor = scrollMonitorToRemove {
+                debugPrint("🔧 DEBUG: Removing scroll monitor")
+                NSEvent.removeMonitor(monitor)
+            }
+            
+            if let monitor = mouseMoveMonitorToRemove {
+                debugPrint("🔧 DEBUG: Removing mouse move monitor")  
+                NSEvent.removeMonitor(monitor)
+            }
+            
+            if let monitor = keyMonitorToRemove {
+                debugPrint("🔧 DEBUG: Removing key monitor")
+                NSEvent.removeMonitor(monitor)
+            }
+            
+            debugPrint("🔧 DEBUG: PopupDismissalManager cleanup completed safely")
         }
-        
-        if let monitor = mouseMoveMonitor {
-            debugPrint("🔧 DEBUG: Removing mouse move monitor")
-            NSEvent.removeMonitor(monitor)
-            mouseMoveMonitor = nil
-        }
-        
-        if let monitor = keyMonitor {
-            debugPrint("🔧 DEBUG: Removing key monitor")
-            NSEvent.removeMonitor(monitor)
-            keyMonitor = nil
-        }
-        
-        debugPrint("🔧 DEBUG: PopupDismissalManager cleanup completed")
     }
 }
